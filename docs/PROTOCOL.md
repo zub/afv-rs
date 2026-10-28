@@ -7,6 +7,13 @@ to interoperate with the AFV servers. The C++ API surface is intentionally ignor
 Where the C++ code has a quirk or bug that affects the wire, it is called out in a
 **Quirk** note so the Rust implementation can decide deliberately whether to replicate it.
 
+**Sources and confidence.** No server source code was available; everything here comes from the
+client. Statements about the client's behaviour and the bytes it sends are read directly from the
+afv-native code. Statements about what the *server* does, or how it is implemented, are marked
+**[Unverified]**: they are inferences from field names, comments, how the client uses the data,
+or general background knowledge. Confirm them against captured live traffic before relying on
+them (see §9).
+
 ---
 
 ## 1. Overview
@@ -22,10 +29,12 @@ The control plane hands the client the UDP endpoint **and the symmetric keys** f
 There is no handshake on UDP: the first datagram the client sends is already encrypted with the key
 received over HTTPS.
 
-The server is the authority on *who hears what*. The client tells the server where its transceivers
-are and what frequency each is on; the server does the propagation/range calculation and forwards
-voice to every client with a transceiver in range on the same frequency, annotated with a signal
-strength (`DistanceRatio`). The client only does local audio presentation (mixing, radio effects).
+**[Unverified]** The server is the authority on *who hears what*. The client tells the server where its
+transceivers are and what frequency each is on; the server does the propagation/range calculation
+and forwards voice to every client with a transceiver in range on the same frequency, annotated with
+a signal strength (`DistanceRatio`). This is inferred from the data the client sends and receives;
+what the code does show is that the client performs no range calculation itself, only local audio
+presentation (mixing, radio effects).
 
 Default API base URL: `https://voice1.vatsim.net`.
 
@@ -52,14 +61,15 @@ Default API base URL: `https://voice1.vatsim.net`.
 
 - All requests to `{baseUrl}/api/v1/...`.
 - JSON bodies are sent with `Content-Type: application/json; charset=UTF-8`.
-- `User-Agent: AFV-Native/1.0` (the official clients presumably send their own; probably not checked).
+- `User-Agent: AFV-Native/1.0`. **[Unverified]** Whether the server inspects it is unknown.
 - Authenticated requests carry `Authorization: Bearer <jwt>`.
 - Redirects followed only for GET.
 - Timeouts used by the C++ client: auth = 5 s connect / 15 s total; everything else 10 s / 30 s.
 - Path segments (`username`, `callsign`, station names) are inserted **without URL-encoding**.
   Callsigns are `[A-Z0-9_-]` in practice, so this is harmless, but a Rust client should encode.
-- JSON key casing is inconsistent between endpoints (see each DTO). The server is ASP.NET and
-  almost certainly deserialises case-insensitively, but replicate the casing below to be safe.
+- JSON key casing is inconsistent between endpoints (see each DTO). Replicate the casing below
+  exactly. **[Unverified]** The server may well deserialise case-insensitively (the naming style suggests a
+  .NET origin), but this is a guess from naming conventions, not something the code shows.
 
 ### 2.2 Authentication — `POST /api/v1/auth`
 
@@ -72,7 +82,8 @@ Request body:
 - `username`: VATSIM CID (as a string).
 - `client`: free-form client name string (identifies the client software).
 
-Response:
+Response, as the C++ client interprets it (the meanings of the error codes are the client's
+error names, not documented server behaviour):
 
 - `200` — body is the **raw JWT as plain text** (not JSON, not quoted).
 - `400` — bad request / client incompatible.
@@ -89,7 +100,7 @@ Token handling:
   subsequent REST calls.
 
 > There is a constant `NetworkVersion = "3a5ddc6d-cf5d-4319-bd0e-d184f772db80"` in `afv/params.h`
-> but it is **never sent** anywhere. It is a leftover from the original .NET client.
+> but it is **never sent** anywhere. **[Unverified]** It is presumably a leftover from an earlier client.
 
 ### 2.3 Allocate voice session — `POST /api/v1/users/{username}/callsigns/{callsign}`
 
@@ -116,8 +127,9 @@ Authenticated. **Empty body.** Response `200`:
   - `aeadTransmitKey` — client encrypts outgoing datagrams with this.
   - `aeadReceiveKey` — client decrypts incoming datagrams with this.
 - `channelTag` — opaque string; placed in every outgoing header and must match on every incoming header.
-- `hmacKey` — unused (always null).
-- A new session = new keys and tag, so nonces (derived from the TX sequence) need not be reset.
+- `hmacKey` — ignored by the client. **[Unverified]** Assumed to be always null.
+- **[Unverified]** Each new session gets new keys and a new tag, so nonces (derived from the TX sequence)
+  never repeat under the same key even though the C++ client does not reset its sequence (§3.6).
 
 Any non-200 or unparsable body → voice session error.
 
@@ -143,16 +155,18 @@ Authenticated. Body is a JSON array of transceivers:
 | `Frequency` | u32 | Hz (e.g. 122.800 MHz = `122800000`). |
 | `LatDeg`, `LonDeg` | f64 | WGS84 degrees. |
 | `HeightMslM` | f64 | Antenna height above mean sea level, metres. |
-| `HeightAglM` | f64 | Antenna height above ground, metres (drives radio horizon). |
+| `HeightAglM` | f64 | Antenna height above ground, metres. **[Unverified]** Presumably drives the server's radio-horizon calculation. |
 | `rco` | bool | Remote Controlled Outlet flag (station transceivers only). Note lowercase key. |
 
 Rules / behaviour:
 
 - Transceivers with `Frequency == 0` are filtered out before sending.
-- The array **replaces** the full transceiver set for this callsign.
+- The client always sends its full transceiver set. **[Unverified]** The server is assumed to replace, not
+  merge, the previous set.
 - Sent immediately when the set changes, and periodically as a keep-alive / position update:
   every **20 s** for pilots, **60 s** for ATC and ATIS.
-- A `200` response means the server now knows the new frequencies. Clients gate PTT on this (§5.1).
+- The client treats a `200` response as "the server now knows the new frequencies" and gates PTT on
+  it (§5.1).
 
 ### 2.6 Cross-couple groups (ATC) — `POST .../callsigns/{callsign}/crossCoupleGroups`
 
@@ -166,16 +180,18 @@ Authenticated. Body:
 ]
 ```
 
-Semantics (server-side): audio received on any transceiver in a group is re-transmitted by the
-server on all other transceivers in the same group ("XC"/frequency coupling, so pilots on different
-frequencies hear each other).
+**[Unverified]** Semantics (server-side): audio received on any transceiver in a group is re-transmitted by
+the server on all other transceivers in the same group ("XC"/frequency coupling, so pilots on
+different frequencies hear each other). Inferred from the endpoint name and how the ATC client
+builds the groups; the client code contains no relaying logic.
 
 How the ATC client builds it:
 
 - Group `0` is **always** present (possibly empty) and holds the transceivers of every frequency
   with "cross-couple across" enabled — i.e. all those frequencies are coupled together.
 - Each frequency with plain `xc` enabled gets its **own** group (`ID` 1, 2, …) containing only
-  that frequency's transceivers — this couples the multiple sites of one frequency together.
+  that frequency's transceivers. **[Unverified]** The intent appears to be coupling the multiple sites of one
+  frequency together.
 - Only frequencies with both `tx` and `rx` enabled and at least one transceiver qualify.
 - Sent together with every transceiver update (immediately after it, without waiting for its response).
 
@@ -185,9 +201,9 @@ All authenticated GETs, all optional for a pilot client.
 
 | Endpoint | Response |
 |---|---|
-| `GET /api/v1/stations/aliased` | `[Station]` — stations that have a frequency alias (e.g. "fake" 199.998 frequencies mapped to real ones). |
+| `GET /api/v1/stations/aliased` | `[Station]` — stations that have a frequency alias. **[Unverified]** Presumably placeholder frequencies (e.g. 199.998) mapped to real ones. |
 | `GET /api/v1/stations/byName/{name}` | `Station` object, or `404` if not found. |
-| `GET /api/v1/stations/byName/{name}/transceivers/allDistinctObeyExclusions` | `[StationTransceiver]` — physical antenna sites for that station. |
+| `GET /api/v1/stations/byName/{name}/transceivers/allDistinctObeyExclusions` | `[StationTransceiver]` — antenna sites for that station. **[Unverified]** What "distinct" and "exclusions" mean server-side is unknown. |
 | `GET /api/v1/stations/byName/{name}/vccsStations` | `[Station]` — the station's VCCS (voice comms) panel list. **Array order is meaningful** (panel order). |
 
 `Station`:
@@ -218,7 +234,8 @@ antenna sites rather than their own position.
 ### 3.1 Socket
 
 - One UDP socket per voice session, bound to an ephemeral local port, `connect()`ed to `addressIpV4`.
-- Datagrams up to 64 KiB are accepted; in practice they are small (<300 bytes).
+- Datagrams up to 64 KiB are accepted. The ones the client sends are small: a 20 ms Opus frame at
+  16 kbit/s is about 40 bytes, plus framing.
 - No fragmentation/reassembly layer; one DTO per datagram.
 
 ### 3.2 Datagram layout
@@ -278,8 +295,10 @@ Receiver checks `dto_len == remaining bytes`; mismatch → drop. DTOs > 65535 by
 
 - **TX**: a u64 counter starting at 0, incremented by one for every datagram sent (heartbeats and
   audio share the counter).
-  **Quirk:** the C++ client never resets it across reconnects of the same client object. Harmless
-  because each session has fresh keys; the server evidently does not require starting at 0.
+  **Quirk:** the C++ client never resets it across reconnects of the same client object.
+  **[Unverified]** This is harmless only if each session has fresh keys (§2.3) and the server does not require
+  sequences to start at 0. Both are assumed because the C++ client reportedly works across
+  reconnects, but neither is confirmed.
 - **RX**: a sliding window replay filter with a 64-entry bitmap.
   - `seq < min` → drop (too old / duplicate).
   - `seq == min` → accept, advance `min` past all consecutively-received sequences.
@@ -316,7 +335,8 @@ All DTOs are MessagePack **arrays** with positional fields (no field names on th
 
 ### 4.2 `HA` — Heartbeat ack (server → client)
 
-Body content is ignored by the client (can be empty, `dto_len` may be 0). Its arrival is the signal.
+Body content is ignored by the client (it also accepts `dto_len` 0). Its arrival is the signal.
+**[Unverified]** The body the server actually sends is unknown.
 
 ### 4.3 `AT` — Audio TX on transceivers (client → server)
 
@@ -337,23 +357,26 @@ Body content is ignored by the client (can be empty, `dto_len` may be 0). Its ar
 ```
 [ Callsign: str,                  // who is talking
   SequenceCounter: uint (u32),
-  Audio: bin,                     // one Opus packet (decoder should also accept str)
+  Audio: bin,                     // one Opus packet; msgpack-c also accepts str here
   LastPacket: bool,
   Transceivers: [ [ID: u16, Frequency: u32 Hz, DistanceRatio: f32], ... ] ]
 ```
 
-- `Transceivers` lists **the receiving client's** transceivers that pick up this transmission.
-  `ID` is the receiver's own transceiver id; `Frequency` is that transceiver's frequency.
-- `DistanceRatio` ∈ (0, 1]: signal strength. 1.0 = close, ~0.1 = edge of range. Used only for
-  local effects (static/crackle amount).
-- Accept float32 or float64 (and ints) for `DistanceRatio`.
+- **[Unverified]** `Transceivers` lists **the receiving client's** transceivers that pick up this
+  transmission: `ID` is the receiver's own transceiver id, `Frequency` that transceiver's
+  frequency. Inferred from how the client uses it: it matches `Frequency` against its own radios
+  and never reads `ID`.
+- `DistanceRatio`: signal strength. A comment in afv-native says "0.0-1.0, with 0.1 on the edge
+  of reception range". The client uses it only for local effects (static/crackle amount).
+- The C++ decoder (msgpack-c) accepts float32, float64 or integers for `DistanceRatio`.
+  **[Unverified]** Which encodings the server actually uses for `Audio` and `DistanceRatio` is unknown.
 
 ### 4.5 Unused / legacy
 
 The C++ tree contains an `AudioOnDirect` shape (`[Callsign, SequenceCounter, Audio, LastPacket, ToCallsign]`)
-and an `IAudioVoiceRoom` (`VoiceRoom: str`) mixin, neither with a DTO name nor used. They are
-remnants of the original .NET client's direct-call / voice-room features. Unknown DTO names
-received from the server are logged and ignored.
+and an `IAudioVoiceRoom` (`VoiceRoom: str`) mixin, neither with a DTO name nor used.
+**[Unverified]** They look like remnants of direct-call / voice-room features in an earlier client. Unknown DTO
+names received from the server are logged and ignored.
 
 ---
 
@@ -373,7 +396,8 @@ Transmit procedure (driven by the microphone capture clock, one call per 20 ms f
 
 1. Every captured frame increments `SequenceCounter` (u32) **whether or not PTT is pressed**.
    The counter is therefore a 20 ms wall-clock tick, which the receiver uses as the jitter-buffer
-   timestamp. (Reset to 0 only on a full client reset.)
+   timestamp. (Reset to 0 only on a full client reset.) **[Unverified]** This relies on the server forwarding
+   the sender's `SequenceCounter` unchanged in `AR`.
 2. While PTT is pressed: encode the frame, send `AT` with `LastPacket = false`.
 3. On the first frame after PTT release: encode and send one final `AT` with `LastPacket = true`.
 4. Afterwards send nothing (heartbeats continue).
@@ -518,9 +542,13 @@ These are observations, not requirements:
   or plain base64 + `serde_json` for reading `exp`.
 - Golden-vector tests: capture a few real datagrams + keys from the C++ client (or the server) and
   assert byte-exact encode/decode.
-- Things to verify against a live server before relying on them:
-  - Whether the server accepts `Audio` as msgpack `str` as well as `bin` (we should send `bin`).
-  - Whether the TX `Sequence` must be monotonically increasing only, or start at 0.
-  - Exact `HA` body content (currently ignored).
+- Things to verify against a live server before relying on them (every **[Unverified]** item
+  above, in particular):
+  - The msgpack encodings the server uses in `AR` (`Audio` as `bin` or `str`; `DistanceRatio`
+    as float32, float64 or int) and the `HA` body.
+  - Whether the server forwards the sender's `SequenceCounter` unchanged.
+  - Whether the TX `Sequence` must start at 0 or only increase, and whether keys and tag are
+    always fresh per session.
+  - Whether a transceiver POST replaces or merges the set.
   - Whether `addressIpV6` is ever populated / usable.
   - Whether JSON key casing matters on `/transceivers` and `/crossCoupleGroups`.
