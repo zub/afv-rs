@@ -7,7 +7,7 @@ version = "0.1.0"
 edition = "2024"
 license = "BSD-3-Clause"
 
-rust-version = "1.85"
+rust-version = "1.95"
 
 [workspace.dependencies]
 afv-proto = { path = "crates/afv-proto" }
