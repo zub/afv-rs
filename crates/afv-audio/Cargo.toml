@@ -1,0 +1,18 @@
+[package]
+name = "afv-audio"
+description = "Audio processing for Audio for VATSIM (AFV): Opus, jitter buffer and radio simulation. No devices, no network."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[features]
+default = ["wav"]
+## Load effect samples from WAV files.
+wav = ["dep:hound"]
+
+[dependencies]
+afv-proto.workspace = true
+hound = { workspace = true, optional = true }
+opus.workspace = true
+thiserror.workspace = true
