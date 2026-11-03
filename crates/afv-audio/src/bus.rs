@@ -7,10 +7,11 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
+use afv_proto::consts::HF_UPPER_LIMIT_HZ;
 use afv_proto::voice::RxTransceiver;
 
 use crate::codec::OpusError;
-use crate::dsp::Carrier;
+use crate::dsp::{Carrier, HfChannel, HfConditions};
 use crate::effects::{EffectSamples, SamplePlayer, Samples};
 use crate::radio::{Output, Radio, RadioSettings, RxChange, Signal};
 use crate::stream::RemoteStream;
@@ -27,6 +28,10 @@ struct Talker {
     carrier: Carrier,
     frame: Box<Frame>,
     has_frame: bool,
+    /// Propagation applied when the talker transmits on HF, and its result for this frame.
+    hf: HfChannel,
+    hf_frame: Box<Frame>,
+    on_hf: bool,
     /// Radios on which this talker was heard in the last rendered frame.
     heard_on: Vec<RadioId>,
 }
@@ -39,6 +44,7 @@ pub struct Bus {
     fetch: Box<Frame>,
     agc_enabled: bool,
     agc_target_db: f64,
+    hf_conditions: HfConditions,
 }
 
 impl Bus {
@@ -51,6 +57,7 @@ impl Bus {
             fetch: Box::new([0.0; FRAME_SAMPLES]),
             agc_enabled: true,
             agc_target_db: -18.0,
+            hf_conditions: HfConditions::default(),
         }
     }
 
@@ -58,7 +65,11 @@ impl Bus {
     pub fn set_radio(&mut self, id: RadioId, settings: RadioSettings) {
         match self.radios.iter_mut().find(|(i, _)| *i == id) {
             Some((_, radio)) => radio.set_settings(settings),
-            None => self.radios.push((id, Radio::new(settings))),
+            None => {
+                let mut radio = Radio::new(settings);
+                radio.set_hf_conditions(self.hf_conditions);
+                self.radios.push((id, radio));
+            }
         }
     }
 
@@ -87,6 +98,18 @@ impl Bus {
             t.stream.agc_mut().set_target_db(target_db);
             t.stream.agc_mut().set_enabled(enabled);
         }
+    }
+
+    /// How HF propagation sounds on radios with effects enabled (default: [`HfConditions::FAIR`]).
+    pub fn set_hf_conditions(&mut self, conditions: HfConditions) {
+        self.hf_conditions = conditions;
+        for (_, radio) in &mut self.radios {
+            radio.set_hf_conditions(conditions);
+        }
+    }
+
+    pub fn hf_conditions(&self) -> HfConditions {
+        self.hf_conditions
     }
 
     /// Plays a sound once on both channels.
@@ -120,6 +143,9 @@ impl Bus {
                     carrier,
                     frame: Box::new([0.0; FRAME_SAMPLES]),
                     has_frame: false,
+                    hf: HfChannel::for_callsign(callsign),
+                    hf_frame: Box::new([0.0; FRAME_SAMPLES]),
+                    on_hf: false,
                     heard_on: Vec::with_capacity(4),
                 };
                 self.talkers.entry(callsign.to_owned()).or_insert(talker)
@@ -164,11 +190,17 @@ impl Bus {
         }
         for t in self.talkers.values_mut() {
             t.has_frame = t.stream.is_active() && t.stream.next_frame(&mut t.frame);
+            t.on_hf = t.has_frame && t.stream.transceivers().iter().any(|x| x.frequency < HF_UPPER_LIMIT_HZ);
+            if t.on_hf {
+                t.hf.process(&self.hf_conditions, &t.frame, &mut t.hf_frame);
+            }
         }
         let talkers = &self.talkers;
         for (_, radio) in &mut self.radios {
-            let signals = talkers.values().filter(|t| t.has_frame).map(|t| Signal {
-                audio: &t.frame,
+            let settings = radio.settings();
+            let hf_effects = settings.effects && settings.frequency < HF_UPPER_LIMIT_HZ;
+            let signals = talkers.values().filter(|t| t.has_frame).map(move |t| Signal {
+                audio: if hf_effects && t.on_hf { &t.hf_frame } else { &t.frame },
                 transceivers: t.stream.transceivers(),
                 carrier: t.carrier,
             });

@@ -5,7 +5,7 @@
 //! - [`Transmitter`]: microphone frames to Opus packets for `AT` messages.
 //! - [`Bus`]: received `AR` packets to a mixed output frame, through per-talker jitter buffers
 //!   and decoders and the per-radio [`Radio`] simulation (static, noise, hardware EQ,
-//!   simultaneous transmissions beating against each other, squelch click).
+//!   simultaneous transmissions beating against each other, HF propagation, squelch click).
 //! - [`dsp`]: the filters and dynamics processors, ported from afv-native.
 //!
 //! The radio simulation is a port of afv-native (BSD-3-Clause, (c) Christopher Collins), including
@@ -28,7 +28,7 @@ pub mod wav;
 pub use bus::{Bus, RadioId};
 pub use codec::OpusError;
 pub use convert::{CaptureConverter, ConvertError, RenderConverter};
-pub use dsp::{Carrier, Hardware};
+pub use dsp::{Carrier, Hardware, HfConditions};
 pub use effects::{EffectSamples, SamplePlayer, Samples};
 pub use radio::{Output, Pan, Radio, RadioSettings, RxChange, Signal};
 pub use tx::{Encoded, LevelMeter, MicProcessor, Transmitter};

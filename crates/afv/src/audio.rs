@@ -12,7 +12,8 @@ use std::time::{Duration, Instant};
 
 use afv_audio::bus::STREAM_IDLE_TIMEOUT;
 use afv_audio::{
-    Bus, CaptureConverter, ConvertError, EffectSamples, MicProcessor, RenderConverter, RxChange, Samples, Transmitter,
+    Bus, CaptureConverter, ConvertError, EffectSamples, HfConditions, MicProcessor, RenderConverter, RxChange, Samples,
+    Transmitter,
 };
 use afv_proto::voice::AudioRx;
 use tokio::sync::{broadcast, mpsc};
@@ -157,6 +158,18 @@ impl Audio {
         let mut engine = self.lock();
         engine.headset.set_agc(enabled, target_db);
         engine.speaker.set_agc(enabled, target_db);
+    }
+
+    /// How HF propagation sounds: mistuning, fading, noise, static and sounders (default
+    /// [`HfConditions::FAIR`]). Applies to HF radios with `effects` enabled, from the next frame.
+    pub fn set_hf_conditions(&self, conditions: HfConditions) {
+        let mut engine = self.lock();
+        engine.headset.set_hf_conditions(conditions);
+        engine.speaker.set_hf_conditions(conditions);
+    }
+
+    pub fn hf_conditions(&self) -> HfConditions {
+        self.lock().headset.hf_conditions()
     }
 
     /// Plays a sound once on `bus`.

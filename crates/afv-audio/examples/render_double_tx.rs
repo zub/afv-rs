@@ -6,12 +6,13 @@
 //! ```
 //!
 //! Inputs must be 48 kHz WAV files (macOS: `say -o a.wav --file-format=WAVE --data-format=LEF32@48000 "..."`).
-//! Station A starts at 0.2 s, station B cuts in at 1.2 s. Writes 16-bit mono WAVs to `OUT_DIR`.
+//! Station A starts at 0.2 s, station B cuts in at 1.2 s. Writes 16-bit mono WAVs to `OUT_DIR`,
+//! ending with station A alone on HF under each of the [`HfConditions`] presets.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use afv_audio::{Bus, Carrier, EffectSamples, FRAME_SAMPLES, RadioSettings, Transmitter};
+use afv_audio::{Bus, Carrier, EffectSamples, FRAME_SAMPLES, HfConditions, RadioSettings, Transmitter};
 use afv_proto::voice::RxTransceiver;
 
 const VHF: u32 = 118_500_000;
@@ -24,8 +25,15 @@ struct Talker<'a> {
     distance_ratio: f32,
 }
 
-fn render(out: &Path, name: &str, frequency: u32, talkers: &[Talker]) -> Result<(), Box<dyn std::error::Error>> {
+fn render(
+    out: &Path,
+    name: &str,
+    frequency: u32,
+    hf: HfConditions,
+    talkers: &[Talker],
+) -> Result<(), Box<dyn std::error::Error>> {
     let mut bus = Bus::new(EffectSamples::default());
+    bus.set_hf_conditions(hf);
     bus.set_radio(1, RadioSettings { frequency, ..RadioSettings::default() });
     let mut txs = talkers.iter().map(|_| Transmitter::new()).collect::<Result<Vec<_>, _>>()?;
     let frames = talkers.iter().map(|t| t.start_frame + t.audio.len() / FRAME_SAMPLES + 2).max().unwrap_or(0) + 25;
@@ -74,10 +82,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (ca, cb) = (Carrier::for_callsign("SAS123"), Carrier::for_callsign("NAX45F"));
     println!("carriers {} Hz apart", (ca.offset_hz - cb.offset_hz).abs());
     let t = |callsign, audio, start_frame, distance_ratio| Talker { callsign, audio, start_frame, distance_ratio };
-    render(out, "1_single", VHF, &[t("SAS123", &a, 10, 1.0)])?;
-    render(out, "2_vhf_equal_strength", VHF, &[t("SAS123", &a, 10, 1.0), t("NAX45F", &b, 60, 1.0)])?;
-    render(out, "3_vhf_strong_vs_weak", VHF, &[t("SAS123", &a, 10, 1.0), t("NAX45F", &b, 60, 0.3)])?;
-    render(out, "4_vhf_weak_vs_strong", VHF, &[t("SAS123", &a, 10, 0.3), t("NAX45F", &b, 60, 1.0)])?;
-    render(out, "5_hf_equal_strength", HF, &[t("SAS123", &a, 10, 1.0), t("NAX45F", &b, 60, 1.0)])?;
+    let fair = HfConditions::FAIR;
+    render(out, "1_single", VHF, fair, &[t("SAS123", &a, 10, 1.0)])?;
+    render(out, "2_vhf_equal_strength", VHF, fair, &[t("SAS123", &a, 10, 1.0), t("NAX45F", &b, 60, 1.0)])?;
+    render(out, "3_vhf_strong_vs_weak", VHF, fair, &[t("SAS123", &a, 10, 1.0), t("NAX45F", &b, 60, 0.3)])?;
+    render(out, "4_vhf_weak_vs_strong", VHF, fair, &[t("SAS123", &a, 10, 0.3), t("NAX45F", &b, 60, 1.0)])?;
+    render(out, "5_hf_equal_strength", HF, fair, &[t("SAS123", &a, 10, 1.0), t("NAX45F", &b, 60, 1.0)])?;
+    let presets = [
+        ("off", HfConditions::OFF),
+        ("good", HfConditions::GOOD),
+        ("fair", fair),
+        ("poor", HfConditions::POOR),
+        ("flutter", HfConditions::FLUTTER),
+    ];
+    for (name, hf) in presets {
+        let shift = afv_audio::dsp::HfChannel::for_callsign("SAS123").shift_hz(&hf);
+        println!("HF {name}: SAS123 starts {shift:+.1} Hz off");
+        render(out, &format!("6_hf_{name}"), HF, hf, &[t("SAS123", &a, 10, 1.0)])?;
+    }
     Ok(())
 }

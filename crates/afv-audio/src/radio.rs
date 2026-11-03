@@ -5,7 +5,7 @@
 use afv_proto::consts::HF_UPPER_LIMIT_HZ;
 use afv_proto::voice::RxTransceiver;
 
-use crate::dsp::{AmChannel, Carrier, Compressor, Hardware, HardwareFilter};
+use crate::dsp::{AmChannel, Atmospherics, Carrier, Compressor, Hardware, HardwareFilter, HfConditions, SsbFilter};
 use crate::effects::{EffectSamples, SamplePlayer};
 use crate::{FRAME_SAMPLES, Frame, SAMPLE_RATE};
 
@@ -33,7 +33,8 @@ pub struct RadioSettings {
     pub gain: f32,
     /// Simulate radio effects; `false` plays voice clean.
     pub effects: bool,
-    /// Suppress the HF background noise.
+    /// HF radios have no squelch, so their background (noise, static, sounders) plays all the
+    /// time; this silences it, and adds the squelch click at the end of a transmission.
     pub hf_squelch: bool,
     pub hardware: Hardware,
     pub muted: bool,
@@ -95,6 +96,12 @@ pub struct Radio {
     hf_noise: Option<SamplePlayer>,
     ac_bus: Option<SamplePlayer>,
     am: AmChannel,
+    hf_conditions: HfConditions,
+    /// HF noise floor, static and sounders (distinct from `crackle`, afv-native's weak-signal
+    /// VHF recording).
+    atmospherics: Atmospherics,
+    /// The HF receiver's sideband filter, applied to voice and static alike.
+    ssb: SsbFilter,
     rx_count: u32,
     channel: Box<Frame>,
     fetch: Box<Frame>,
@@ -108,6 +115,7 @@ fn mix(dst: &mut Frame, src: &Frame, gain: f32) {
 
 impl Radio {
     pub fn new(settings: RadioSettings) -> Self {
+        let seed = settings.frequency as u64;
         Self {
             filter: HardwareFilter::new(settings.hardware),
             settings,
@@ -120,6 +128,9 @@ impl Radio {
             hf_noise: None,
             ac_bus: None,
             am: AmChannel::new(),
+            hf_conditions: HfConditions::default(),
+            atmospherics: Atmospherics::new(seed),
+            ssb: SsbFilter::default(),
             rx_count: 0,
             channel: Box::new([0.0; FRAME_SAMPLES]),
             fetch: Box::new([0.0; FRAME_SAMPLES]),
@@ -142,6 +153,11 @@ impl Radio {
         self.settings = settings;
     }
 
+    /// HF propagation; the radio adds the static from it while receiving on HF.
+    pub fn set_hf_conditions(&mut self, conditions: HfConditions) {
+        self.hf_conditions = conditions;
+    }
+
     /// While transmitting, the radio outputs nothing it receives.
     pub fn set_transmitting(&mut self, transmitting: bool) {
         self.transmitting = transmitting;
@@ -162,6 +178,8 @@ impl Radio {
             self.rx_count = 0;
         }
         self.crackle = None;
+        self.atmospherics.reset();
+        self.ssb.reset();
         self.vhf_noise = None;
         self.hf_noise = None;
         self.ac_bus = None;
@@ -248,13 +266,30 @@ impl Radio {
         } else {
             self.am.idle();
         }
+        // HF sets have no squelch: unless `hf_squelch` asks for one, the receiver's background
+        // plays whether or not anyone is transmitting (skipped while it cannot be heard anyway).
+        let unsquelched = hf && fx_on && !hf_squelch;
+        let open_hf = unsquelched && audible;
+        if open_hf {
+            (hf_gain, vhf_gain, ac_gain) = (HF_NOISE_GAIN, 0.0, HF_AC_BUS_GAIN);
+        }
 
         let mut change = None;
-        if count > 0 {
-            if self.rx_count == 0 && !ignore {
-                change = Some(RxChange::Started);
-            }
+        if count > 0 && self.rx_count == 0 && !ignore {
+            change = Some(RxChange::Started);
+        }
+        if count > 0 || open_hf {
             if fx_on {
+                if hf {
+                    // What an SSB receiver hears: noise, static and sounders added to the signal,
+                    // all through the sideband filter, ahead of the rest of the audio chain.
+                    if hf_gain > 0.0 {
+                        self.fetch.fill(0.0);
+                        self.atmospherics.add(&self.hf_conditions, &mut self.fetch);
+                        mix(&mut self.channel, &self.fetch, gain);
+                    }
+                    self.ssb.process(&mut self.channel[..]);
+                }
                 self.channel.iter_mut().for_each(|x| *x = x.clamp(-1.0, 1.0));
                 let start = |p: &mut Option<SamplePlayer>, samples: &Option<crate::effects::Samples>| {
                     if p.is_none() {
@@ -277,10 +312,13 @@ impl Radio {
             }
         } else {
             self.reset_effects(true);
-            if self.rx_count > 0 {
+        }
+        if count == 0 && self.rx_count > 0 {
+            // The squelch closing; an HF receiver without one has nothing to click.
+            if !unsquelched {
                 self.click = effects.click.clone().map(|s| SamplePlayer::new(s, false));
-                change = Some(RxChange::Ended);
             }
+            change = Some(RxChange::Ended);
         }
         self.rx_count = count;
         Self::mix_effect(&mut self.click, CLICK_GAIN * gain, &mut self.channel, &mut self.fetch);

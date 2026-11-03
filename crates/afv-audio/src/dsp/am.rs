@@ -29,8 +29,7 @@ impl Carrier {
     /// A carrier derived from the callsign, so that a given pair of stations always beats at the
     /// same frequency, as real ones do.
     pub fn for_callsign(callsign: &str) -> Self {
-        // FNV-1a: stable across platforms and Rust versions, unlike `DefaultHasher`.
-        let h = callsign.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, b| (h ^ b as u64).wrapping_mul(0x100_0000_01b3));
+        let h = super::callsign_hash(callsign);
         let span = 2 * Self::MAX_OFFSET_HZ as u64 + 1;
         Self { offset_hz: (h % span) as i16 - Self::MAX_OFFSET_HZ, phase: ((h >> 32) % SAMPLE_RATE as u64) as u16 }
     }

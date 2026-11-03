@@ -10,7 +10,11 @@ Rust implementation of an Audio for VATSIM client. Wire-compatible with the AFV 
 - Audio devices are optional: the library works on sample buffers; a `cpal` backend is a feature.
 - Real-time safe audio path (no locks contended with the network, no allocation in callbacks).
 - Faithful radio simulation (crackle, noise, hardware EQ, squelch click), with simultaneous VHF
-  transmissions modelled as beating AM carriers instead of afv-native's fixed blocking tone.
+  transmissions modelled as beating AM carriers instead of afv-native's fixed blocking tone, and
+  HF propagation that is not in afv-native at all: single-sideband mistuning, Watterson multipath
+  fading with slow log-normal fading on top, and a noise floor, static crashes and ionospheric
+  sounders heard through a sideband filter, adjustable from clean to poor conditions
+  (`HfConditions`; see [HF.md](HF.md)).
 - Async (tokio) networking; typed errors; events as a stream instead of callbacks.
 
 ## Crate layout (workspace)

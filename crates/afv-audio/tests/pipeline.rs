@@ -2,8 +2,11 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use afv_audio::codec::{Decoder, Encoder};
+use afv_audio::dsp::HfChannel;
 use afv_audio::radio::{Output, Signal};
-use afv_audio::{Bus, Carrier, EffectSamples, FRAME_SAMPLES, Frame, Pan, Radio, RadioSettings, RxChange, Transmitter};
+use afv_audio::{
+    Bus, Carrier, EffectSamples, FRAME_SAMPLES, Frame, HfConditions, Pan, Radio, RadioSettings, RxChange, Transmitter,
+};
 use afv_proto::voice::RxTransceiver;
 
 const FREQ: u32 = 122_800_000;
@@ -13,6 +16,17 @@ fn sine(frame_index: usize, freq: f32, amp: f32) -> Frame {
         let t = (frame_index * FRAME_SAMPLES + i) as f32 / 48_000.0;
         amp * (std::f32::consts::TAU * freq * t).sin()
     })
+}
+
+/// Amplitude of `freq` in `x` (one DFT bin).
+fn tone(x: &[f32], freq: f64) -> f32 {
+    let (mut re, mut im) = (0f64, 0f64);
+    for (i, s) in x.iter().enumerate() {
+        let a = std::f64::consts::TAU * freq * i as f64 / 48_000.0;
+        re += *s as f64 * a.cos();
+        im += *s as f64 * a.sin();
+    }
+    (2.0 * re.hypot(im) / x.len() as f64) as f32
 }
 
 fn rms(frame: &[f32]) -> f32 {
@@ -273,4 +287,168 @@ fn bus_mono_ignores_pan_and_plays_sounds() {
     assert_eq!((out[0], out[99], out[100]), (1.0, 1.0, 0.0));
     bus.render_mono(&mut out, |_, _, _| {});
     assert_eq!(out[0], 0.0);
+}
+
+const HF: u32 = 8_891_000;
+
+/// A 1 kHz transmission from `callsign` on `frequency`, through a bus with one radio. Returns the
+/// output after the first 400 ms.
+fn render_one(callsign: &str, frequency: u32, radio: RadioSettings, conditions: HfConditions) -> Vec<f32> {
+    let mut tx = Transmitter::new().unwrap();
+    tx.set_ptt(true);
+    let mut bus = Bus::new(EffectSamples::default());
+    bus.set_hf_conditions(conditions);
+    bus.set_radio(1, radio);
+    let start = Instant::now();
+    let mut out = Vec::new();
+    let mut frame = [0.0; FRAME_SAMPLES];
+    for i in 0..60 {
+        let p = tx.process(&sine(i, 1000.0, 0.3)).unwrap().unwrap();
+        bus.push(
+            callsign,
+            p.sequence,
+            p.opus,
+            false,
+            &rx(frequency, 1.0),
+            start + Duration::from_millis(20 * i as u64),
+        )
+        .unwrap();
+        bus.render_mono(&mut frame, |_, _, _| {});
+        out.extend_from_slice(&frame);
+    }
+    out.split_off(20 * FRAME_SAMPLES)
+}
+
+#[test]
+fn hf_propagation_shifts_voice_on_hf_radios_with_effects() {
+    let conditions = HfConditions { offset_hz: 100.0, ..HfConditions::OFF };
+    // A station whose tuning error is clearly audible.
+    let (callsign, shift) = (0..)
+        .map(|n| format!("TEST{n}"))
+        .map(|c| {
+            let shift = HfChannel::for_callsign(&c).shift_hz(&conditions);
+            (c, shift)
+        })
+        .find(|(_, shift)| shift.abs() > 50.0)
+        .unwrap();
+    let radio = RadioSettings { frequency: HF, ..RadioSettings::default() };
+
+    let out = render_one(&callsign, HF, radio.clone(), conditions);
+    let (shifted, original) = (tone(&out, 1000.0 + shift), tone(&out, 1000.0));
+    assert!(shifted > 5.0 * original, "{shift:+.0} Hz: {shifted} at the shifted tone, {original} at 1 kHz");
+
+    let clean = render_one(&callsign, HF, RadioSettings { effects: false, ..radio }, conditions);
+    let (shifted, original) = (tone(&clean, 1000.0 + shift), tone(&clean, 1000.0));
+    assert!(original > 5.0 * shifted, "effects off: {shifted} at the shifted tone, {original} at 1 kHz");
+}
+
+#[test]
+fn vhf_is_untouched_by_hf_conditions() {
+    let radio = RadioSettings { frequency: FREQ, ..RadioSettings::default() };
+    let poor = render_one("SAS123", FREQ, radio.clone(), HfConditions::POOR);
+    let off = render_one("SAS123", FREQ, radio, HfConditions::OFF);
+    assert_eq!(poor, off);
+}
+
+#[test]
+fn hf_radios_hear_their_background_all_the_time() {
+    let fx = EffectSamples::default();
+    let silence = [0.0; FRAME_SAMPLES];
+    let peak_over = |settings: RadioSettings, receiving: bool, transmitting: bool| {
+        let frequency = settings.frequency;
+        let mut radio = Radio::new(settings);
+        radio.set_hf_conditions(HfConditions::POOR);
+        radio.set_transmitting(transmitting);
+        let transceivers = rx(frequency, 1.0);
+        let streams: &[(&Frame, &[RxTransceiver])] = if receiving { &[(&silence, &transceivers)] } else { &[] };
+        (0..100).map(|_| process(&mut radio, streams, &fx).0).fold(0f32, |m, l| l.iter().fold(m, |m, s| m.max(s.abs())))
+    };
+    let hf = RadioSettings { frequency: HF, ..RadioSettings::default() };
+    assert!(peak_over(hf.clone(), true, false) > 0.05, "while receiving");
+    assert!(peak_over(hf.clone(), false, false) > 0.05, "and with nobody transmitting: HF has no squelch");
+    assert_eq!(peak_over(hf.clone(), false, true), 0.0, "silent while transmitting");
+    assert_eq!(peak_over(RadioSettings { muted: true, ..hf.clone() }, false, false), 0.0, "muted");
+    for receiving in [true, false] {
+        assert_eq!(peak_over(RadioSettings { hf_squelch: true, ..hf.clone() }, receiving, false), 0.0, "HF squelch");
+        assert_eq!(peak_over(RadioSettings { effects: false, ..hf.clone() }, receiving, false), 0.0, "effects off");
+    }
+    let vhf = RadioSettings { frequency: FREQ, ..RadioSettings::default() };
+    assert_eq!(peak_over(vhf, false, false), 0.0, "VHF stays squelched");
+}
+
+#[test]
+fn hf_radios_do_not_click_at_the_end_of_a_transmission() {
+    let ones: Arc<[f32]> = vec![1.0; 4800].into();
+    let fx = EffectSamples { click: Some(ones), ..EffectSamples::default() };
+    let silence = [0.0; FRAME_SAMPLES];
+    let end = |squelch: bool| {
+        let mut radio = Radio::new(RadioSettings { frequency: HF, hf_squelch: squelch, ..RadioSettings::default() });
+        radio.set_hf_conditions(HfConditions::OFF);
+        process(&mut radio, &[(&silence, &rx(HF, 1.0))], &fx);
+        let (l, _, change) = process(&mut radio, &[], &fx);
+        assert_eq!(change, Some(RxChange::Ended), "the end is still reported");
+        l.iter().fold(0f32, |m, s| m.max(s.abs()))
+    };
+    assert!(end(false) < 0.01, "no squelch, no click: {}", end(false));
+    // Nor when the transmission ends while we are transmitting ourselves and only heard later.
+    let mut radio = Radio::new(RadioSettings { frequency: HF, ..RadioSettings::default() });
+    radio.set_hf_conditions(HfConditions::OFF);
+    process(&mut radio, &[(&silence, &rx(HF, 1.0))], &fx);
+    radio.set_transmitting(true);
+    process(&mut radio, &[], &fx);
+    radio.set_transmitting(false);
+    let (l, _, _) = process(&mut radio, &[], &fx);
+    assert!(l.iter().all(|s| s.abs() < 0.01), "no click after releasing PTT");
+    assert!(end(true) > 1.0, "with HF squelch the click is back: {}", end(true));
+}
+
+#[test]
+fn hf_radios_hear_through_a_sideband_filter() {
+    // 150 Hz is inside the hardware filter's gentle skirt but far outside the SSB passband.
+    let level = |settings: RadioSettings, freq: f64| {
+        let mut radio = Radio::new(settings.clone());
+        radio.set_hf_conditions(HfConditions::OFF);
+        let fx = EffectSamples::default();
+        let transceivers = rx(settings.frequency, 1.0);
+        let out: Vec<f32> =
+            (0..50).flat_map(|i| process(&mut radio, &[(&sine(i, freq as f32, 0.05), &transceivers)], &fx).0).collect();
+        tone(&out[24_000..], freq)
+    };
+    let hf = RadioSettings { frequency: HF, ..RadioSettings::default() };
+    let vhf = RadioSettings { frequency: FREQ, ..RadioSettings::default() };
+    let rejection = |s: RadioSettings| level(s.clone(), 1000.0) / level(s, 150.0);
+    let (hf, vhf) = (rejection(hf), rejection(vhf));
+    assert!(hf > 1000.0, "HF: 1 kHz is {hf}× 150 Hz");
+    assert!(vhf < 100.0, "VHF keeps its hardware response: 1 kHz is {vhf}× 150 Hz");
+}
+
+#[test]
+fn hf_static_goes_through_the_sideband_filter() {
+    // Static only: silent voice on an HF radio under heavy crackle.
+    let mut radio = Radio::new(RadioSettings { frequency: HF, ..RadioSettings::default() });
+    radio.set_hf_conditions(HfConditions { crackle_rate_hz: 20.0, crackle_level: 1.0, ..HfConditions::OFF });
+    let (fx, silence, transceivers) = (EffectSamples::default(), [0.0; FRAME_SAMPLES], rx(HF, 1.0));
+    let out: Vec<f32> = (0..250).flat_map(|_| process(&mut radio, &[(&silence, &transceivers)], &fx).0).collect();
+    let band = |lo: f64, hi: f64| (0..20).map(|k| tone(&out, lo + (hi - lo) * k as f64 / 20.0).powi(2)).sum::<f32>();
+    let (voice, high) = (band(800.0, 1200.0), band(7000.0, 9000.0));
+    assert!(voice > 1e4 * high, "1 kHz band {voice}, 8 kHz band {high}");
+}
+
+#[test]
+fn hf_radios_play_each_kind_of_background() {
+    let only_noise = HfConditions { noise_level: 0.5, ..HfConditions::OFF };
+    let only_sounders = HfConditions { sounder_rate_hz: 5.0, sounder_level: 1.0, ..HfConditions::OFF };
+    let output = |conditions: HfConditions, squelch: bool| {
+        let mut radio = Radio::new(RadioSettings { frequency: HF, hf_squelch: squelch, ..RadioSettings::default() });
+        radio.set_hf_conditions(conditions);
+        let (fx, silence, transceivers) = (EffectSamples::default(), [0.0; FRAME_SAMPLES], rx(HF, 1.0));
+        (0..250).flat_map(|_| process(&mut radio, &[(&silence, &transceivers)], &fx).0).collect::<Vec<f32>>()
+    };
+    let noise = output(only_noise, false);
+    let audible = noise[4800..].iter().filter(|s| s.abs() > 1e-4).count() as f32 / (noise.len() - 4800) as f32;
+    assert!(audible > 0.99, "the noise floor is continuous: {:.0} %", audible * 100.0);
+    assert!(output(only_sounders, false).iter().any(|s| s.abs() > 0.01), "sounders are heard");
+    for c in [only_noise, only_sounders] {
+        assert!(output(c, true).iter().all(|&s| s == 0.0), "HF squelch removes {c:?}");
+    }
 }
