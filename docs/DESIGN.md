@@ -52,6 +52,7 @@ pub struct RadioConfig {
     pub hf_hardware: HfHardware,     // Collins HFS-900D
     pub effects: bool,
     pub hf_squelch: bool,
+    pub muted: bool,                 // play nothing, still report reception
 }
 ```
 

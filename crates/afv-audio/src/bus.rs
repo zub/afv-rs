@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use afv_proto::consts::HF_UPPER_LIMIT_HZ;
+use afv_proto::consts::is_hf;
 use afv_proto::voice::RxTransceiver;
 
 use crate::codec::OpusError;
@@ -160,7 +160,7 @@ impl Bus {
 
     /// Whether any radio on this bus is tuned to one of `transceivers`' frequencies.
     pub fn hears(&self, transceivers: &[RxTransceiver]) -> bool {
-        self.radios.iter().any(|(_, r)| transceivers.iter().any(|t| t.frequency == r.settings().frequency))
+        self.radios.iter().any(|(_, r)| r.tuned_to(transceivers))
     }
 
     /// Forgets talkers that have been silent longer than `timeout`.
@@ -193,7 +193,7 @@ impl Bus {
         }
         for t in self.talkers.values_mut() {
             t.has_frame = t.stream.is_active() && t.stream.next_frame(&mut t.frame);
-            t.on_hf = t.has_frame && t.stream.transceivers().iter().any(|x| x.frequency < HF_UPPER_LIMIT_HZ);
+            t.on_hf = t.has_frame && t.stream.transceivers().iter().any(|x| is_hf(x.frequency));
             if t.on_hf {
                 self.fetch.copy_from_slice(&t.frame[..]);
                 t.speech_processor.process(&mut self.fetch[..]);
@@ -202,8 +202,7 @@ impl Bus {
         }
         let talkers = &self.talkers;
         for (_, radio) in &mut self.radios {
-            let settings = radio.settings();
-            let hf_effects = settings.effects && settings.frequency < HF_UPPER_LIMIT_HZ;
+            let hf_effects = radio.simulates_hf();
             let signals = talkers.values().filter(|t| t.has_frame).map(move |t| Signal {
                 audio: if hf_effects && t.on_hf { &t.hf_frame } else { &t.frame },
                 transceivers: t.stream.transceivers(),
@@ -219,15 +218,12 @@ impl Bus {
         self.mix_sounds(left, right);
     }
 
-    /// Compares who is heard on which radio with the previous frame. A talker is heard on a radio
-    /// while it is producing audio on the radio's frequency and the radio is not transmitting.
+    /// Compares who is heard on which radio with the previous frame (see [`Radio::hears`]). This
+    /// is the only place reception is reported; a muted radio still reports it.
     fn report_rx(&mut self, on_rx: &mut impl FnMut(RadioId, &str, RxChange)) {
         for (callsign, t) in &mut self.talkers {
             for (id, radio) in &self.radios {
-                let frequency = radio.settings().frequency;
-                let heard = t.has_frame
-                    && !radio.transmitting()
-                    && t.stream.transceivers().iter().any(|x| x.frequency == frequency);
+                let heard = t.has_frame && radio.hears(t.stream.transceivers());
                 match (heard, t.heard_on.iter().position(|r| r == id)) {
                     (true, None) => {
                         t.heard_on.push(*id);

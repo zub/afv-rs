@@ -7,7 +7,7 @@ use afv_audio::EffectSamples;
 use afv_proto::api::{CrossCoupleGroup, Station, StationTransceiver};
 use tokio::sync::{Notify, broadcast, watch};
 use tokio::task::JoinHandle;
-use tokio::time::sleep;
+use tokio::time::{Instant, sleep, sleep_until};
 
 use crate::audio::Audio;
 use crate::events::{Event, Events};
@@ -17,7 +17,6 @@ use crate::{Result, Session, SessionBuilder, SessionState, Timing};
 
 /// Changes arriving within this window are sent to the server together.
 const DEBOUNCE: Duration = Duration::from_millis(20);
-const SYNC_RETRY: Duration = Duration::from_secs(5);
 const EVENT_CAPACITY: usize = 256;
 
 /// Configures and connects a [`Client`].
@@ -271,9 +270,13 @@ impl Inner {
         let _ = self.events.send(Event::PttOpened);
     }
 
-    /// Sends radio changes to the server, and forwards session state changes as events.
+    /// Sends radio changes to the server, retrying failed updates, and forwards session state
+    /// changes as events.
     async fn sync_loop(self: Arc<Self>, mut shutdown: watch::Receiver<bool>) {
         let mut session_state = self.shared.watch_state();
+        // When to try again after a failed update. Any sync sends the whole current plan, so a
+        // successful one in the meantime makes the retry unnecessary.
+        let mut retry: Option<Instant> = None;
         loop {
             tokio::select! {
                 _ = shutdown.changed() => return,
@@ -286,16 +289,18 @@ impl Inner {
                     continue;
                 }
                 _ = self.changed.notified() => {}
+                _ = sleep_until(retry.unwrap_or_else(Instant::now)), if retry.is_some() => {}
             }
             tokio::select! {
                 _ = shutdown.changed() => return,
                 _ = sleep(DEBOUNCE) => {}
             }
-            self.sync().await;
+            retry = (!self.sync().await).then(|| Instant::now() + self.shared.timing().transceiver_retry);
         }
     }
 
-    async fn sync(self: &Arc<Self>) {
+    /// Brings the server up to date with the radios. Returns `false` if that failed.
+    async fn sync(&self) -> bool {
         let (plan, groups) = {
             let mut state = self.lock();
             let plan = state.plan();
@@ -306,7 +311,7 @@ impl Inner {
                 self.audio.set_tx_transceivers(&plan.tx);
                 self.shared.store_transceivers(plan.transceivers.clone());
                 state.acked = plan;
-                return;
+                return true;
             }
             state.in_flight = true;
             let groups = match &plan.groups {
@@ -334,17 +339,12 @@ impl Inner {
                 if state.ptt_requested && !state.ptt_open && state.synced() {
                     self.open_ptt(&mut state);
                 }
+                true
             }
             Err(e) => {
                 tracing::warn!("transceiver update failed: {e}");
                 let _ = self.events.send(Event::TransceiverSyncFailed(Arc::new(e)));
-                let inner = Arc::downgrade(self);
-                tokio::spawn(async move {
-                    sleep(SYNC_RETRY).await;
-                    if let Some(inner) = inner.upgrade() {
-                        inner.changed.notify_one();
-                    }
-                });
+                false
             }
         }
     }

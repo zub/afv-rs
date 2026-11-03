@@ -109,6 +109,21 @@ async fn transceiver_posts_never_overlap() {
 }
 
 #[tokio::test]
+async fn no_transceiver_post_arrives_after_the_callsign_is_released() {
+    // Slow answers and a refresh faster than them leave refreshes outstanding at the end.
+    let server = FakeServer::start().await;
+    let timing = afv::Timing { transceiver_refresh: Duration::from_millis(20), ..fast_timing() };
+    let session = server.builder().timing(timing).connect().await.unwrap();
+    session.set_transceivers(vec![transceiver(0, 122_800_000)]).await.unwrap();
+    server.fake.transceiver_delay_ms.store(50, SeqCst);
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    session.disconnect().await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let at_release = server.fake.posts_at_release.lock().unwrap().expect("callsign released");
+    assert_eq!(server.transceiver_post_count(), at_release, "posts after the release");
+}
+
+#[tokio::test]
 async fn heartbeat_timeout_reconnects_and_restores_transceivers() {
     let server = FakeServer::start().await;
     let session = server.builder().connect().await.unwrap();

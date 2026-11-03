@@ -8,8 +8,8 @@
 //! starts over for the talker's next transmission. Storage is fixed, so pushing and popping never
 //! allocate.
 
-/// Largest Opus packet (RFC 6716 §3.4).
-pub const MAX_PACKET: usize = 1275;
+use crate::codec::MAX_PACKET;
+
 /// Slots in the ring; also the furthest ahead of the play position a packet may arrive.
 const CAPACITY: usize = 64;
 /// Initial and minimum frames buffered before playback.

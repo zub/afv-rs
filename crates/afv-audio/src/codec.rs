@@ -6,19 +6,19 @@ use crate::{FRAME_SAMPLES, Frame, SAMPLE_RATE};
 
 pub use opus::Error as OpusError;
 
-/// Upper bound for one encoded 20 ms frame.
-const MAX_ENCODED: usize = 1275;
+/// Largest Opus packet (RFC 6716 §3.4).
+pub const MAX_PACKET: usize = 1275;
 
 pub struct Encoder {
     inner: opus::Encoder,
-    buffer: Box<[u8; MAX_ENCODED]>,
+    buffer: Box<[u8; MAX_PACKET]>,
 }
 
 impl Encoder {
     pub fn new() -> Result<Self, OpusError> {
         let mut inner = opus::Encoder::new(SAMPLE_RATE, opus::Channels::Mono, opus::Application::Voip)?;
         inner.set_bitrate(opus::Bitrate::Bits(OPUS_BITRATE))?;
-        Ok(Self { inner, buffer: Box::new([0; MAX_ENCODED]) })
+        Ok(Self { inner, buffer: Box::new([0; MAX_PACKET]) })
     }
 
     /// Encodes one frame. The returned slice is valid until the next call.

@@ -27,7 +27,6 @@ pub mod devices;
 mod error;
 mod events;
 mod frequency;
-mod liveness;
 pub mod radio;
 pub mod realtime;
 mod session;

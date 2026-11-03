@@ -43,6 +43,8 @@ pub struct Fake {
     /// Transceiver posts being answered right now, and the most there ever were at once.
     pub transceiver_posts_in_flight: AtomicU32,
     pub max_transceiver_posts_in_flight: AtomicU32,
+    /// How many transceiver posts had arrived when the callsign was last released.
+    pub posts_at_release: Mutex<Option<usize>>,
     /// Answer transceiver posts with HTTP 500.
     pub fail_transceivers: AtomicBool,
     pub cross_couple_posts: Mutex<Vec<Vec<CrossCoupleGroup>>>,
@@ -128,6 +130,7 @@ pub fn fast_timing() -> Timing {
         degraded_after: 5,
         timeout_after: 10,
         transceiver_refresh: Duration::from_millis(200),
+        transceiver_retry: Duration::from_millis(100),
         token_refresh_margin: Duration::from_secs(60),
         reconnect_backoff: Duration::from_millis(20),
         reconnect_backoff_max: Duration::from_millis(100),
@@ -202,6 +205,7 @@ async fn release(State((fake, _)): AppState, headers: HeaderMap) -> StatusCode {
         return StatusCode::UNAUTHORIZED;
     }
     fake.releases.fetch_add(1, SeqCst);
+    *fake.posts_at_release.lock().unwrap() = Some(fake.transceiver_posts.lock().unwrap().len());
     StatusCode::OK
 }
 

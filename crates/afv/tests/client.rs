@@ -138,6 +138,24 @@ async fn a_failed_update_keeps_ptt_closed_until_it_succeeds() {
 }
 
 #[tokio::test]
+async fn a_failed_update_is_retried_without_another_change() {
+    let server = FakeServer::start().await;
+    let client = server.client_builder().connect().await.unwrap();
+    let mut events = client.events();
+    client.set_position(POS);
+    server.fake.fail_transceivers.store(true, SeqCst);
+    client.add_radio(tx_radio("122.800"));
+    client.set_ptt(true);
+    wait_event(&mut events, |e| matches!(e, Event::TransceiverSyncFailed(_))).await;
+    // Still refused on the retry, then accepted on the one after.
+    wait_event(&mut events, |e| matches!(e, Event::TransceiverSyncFailed(_))).await;
+    server.fake.fail_transceivers.store(false, SeqCst);
+    wait_event(&mut events, |e| matches!(e, Event::PttOpened)).await;
+    assert_eq!(server.last_transceivers().unwrap()[0].frequency, 122_800_000);
+    client.disconnect().await;
+}
+
+#[tokio::test]
 async fn transmits_captured_audio_on_the_tx_transceivers() {
     let server = FakeServer::start().await;
     let client = server.client_builder().connect().await.unwrap();

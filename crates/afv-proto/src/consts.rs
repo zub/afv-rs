@@ -32,3 +32,8 @@ pub const OPUS_BITRATE: i32 = 16_384;
 
 /// Frequencies below this are treated as HF for radio effects.
 pub const HF_UPPER_LIMIT_HZ: u32 = 30_000_000;
+
+/// Whether `hz` is an HF frequency (single sideband). 0, which tunes to nothing, is not.
+pub const fn is_hf(hz: u32) -> bool {
+    hz != 0 && hz < HF_UPPER_LIMIT_HZ
+}

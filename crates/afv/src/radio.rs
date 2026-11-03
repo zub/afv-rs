@@ -111,6 +111,9 @@ pub struct RadioConfig {
     pub effects: bool,
     /// Suppress HF background noise.
     pub hf_squelch: bool,
+    /// Play nothing, but still report reception ([`crate::Event::RxStarted`]), e.g. for a
+    /// frequency only monitored on a panel.
+    pub muted: bool,
 }
 
 impl RadioConfig {
@@ -128,6 +131,7 @@ impl RadioConfig {
             hf_hardware: HfHardware::default(),
             effects: true,
             hf_squelch: false,
+            muted: false,
         }
     }
 
@@ -150,7 +154,7 @@ impl RadioConfig {
             hf_squelch: self.hf_squelch,
             vhf_hardware: self.vhf_hardware,
             hf_hardware: self.hf_hardware,
-            muted: false,
+            muted: self.muted,
             pan: self.output.pan,
         }
     }
@@ -333,6 +337,14 @@ mod tests {
         assert!(retuned.differs_from(&base));
         let coupled = Plan::build([&RadioConfig { coupling: Coupling::Across, ..com1 }], Some(POS));
         assert!(coupled.differs_from(&base));
+    }
+
+    #[test]
+    fn muted_radios_keep_their_transceivers_and_tell_the_audio() {
+        let muted = RadioConfig { muted: true, ..RadioConfig::pilot(freq("122.800")) };
+        assert!(muted.audio_settings().muted);
+        assert!(!RadioConfig::pilot(freq("122.800")).audio_settings().muted);
+        assert_eq!(Plan::build([&muted], Some(POS)).transceivers.len(), 1);
     }
 
     #[test]

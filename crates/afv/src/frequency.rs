@@ -31,9 +31,9 @@ impl Frequency {
         self.0
     }
 
-    /// HF radios (below 30 MHz) are single sideband and sound different.
+    /// HF radios (below 30 MHz) are single sideband and sound different. 0 is not HF.
     pub const fn is_hf(self) -> bool {
-        self.0 < afv_proto::consts::HF_UPPER_LIMIT_HZ
+        afv_proto::consts::is_hf(self.0)
     }
 }
 
@@ -107,5 +107,6 @@ mod tests {
         assert_eq!(Frequency::mhz(122.8), Frequency::from_hz(122_800_000));
         assert_eq!(Frequency::mhz(118.0125), Frequency::from_hz(118_012_500));
         assert!(Frequency::mhz(29.999).is_hf() && !Frequency::mhz(30.0).is_hf());
+        assert!(!Frequency::from_hz(0).is_hf(), "untuned is not HF");
     }
 }

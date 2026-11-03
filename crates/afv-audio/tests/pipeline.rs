@@ -86,11 +86,7 @@ fn transmitter_applies_gain_with_clipping_and_meters() {
     assert!(tx.meter().level() > 0.0);
 }
 
-fn process(
-    radio: &mut Radio,
-    streams: &[(&Frame, &[RxTransceiver])],
-    fx: &EffectSamples,
-) -> (Frame, Frame, Option<RxChange>) {
+fn process(radio: &mut Radio, streams: &[(&Frame, &[RxTransceiver])], fx: &EffectSamples) -> (Frame, Frame, u32) {
     let (mut l, mut r) = ([0.0; FRAME_SAMPLES], [0.0; FRAME_SAMPLES]);
     // Talker `i` transmits 150·i Hz off frequency.
     let signals = streams.iter().enumerate().map(|(i, &(audio, transceivers))| Signal {
@@ -98,8 +94,8 @@ fn process(
         transceivers,
         carrier: Carrier { offset_hz: 150 * i as i16, phase: 0 },
     });
-    let change = radio.process(signals, fx, Output::Stereo { left: &mut l, right: &mut r });
-    (l, r, change)
+    radio.process(signals, fx, Output::Stereo { left: &mut l, right: &mut r });
+    (l, r, radio.receiving())
 }
 
 #[test]
@@ -108,13 +104,13 @@ fn radio_without_effects_passes_matching_voice_only() {
     let voice = sine(0, 440.0, 0.4);
     let mut radio = Radio::new(RadioSettings { gain: 0.5, ..clean(FREQ) });
 
-    let (l, r, change) = process(&mut radio, &[(&voice, &rx(FREQ, 1.0))], &fx);
-    assert_eq!(change, Some(RxChange::Started));
+    let (l, r, receiving) = process(&mut radio, &[(&voice, &rx(FREQ, 1.0))], &fx);
+    assert_eq!(receiving, 1);
     assert!(l.iter().zip(&voice).all(|(o, v)| *o == 0.5 * v));
     assert_eq!(l, r);
 
-    let (l, _, change) = process(&mut radio, &[(&voice, &rx(FREQ + 25_000, 1.0))], &fx);
-    assert_eq!(change, Some(RxChange::Ended));
+    let (l, _, receiving) = process(&mut radio, &[(&voice, &rx(FREQ + 25_000, 1.0))], &fx);
+    assert_eq!(receiving, 0);
     assert!(l.iter().all(|&s| s == 0.0));
 }
 
@@ -129,13 +125,14 @@ fn radio_pan_mute_and_transmit() {
     assert!(rms(&l) > 0.1 && rms(&r) == 0.0);
 
     let mut radio = Radio::new(RadioSettings { muted: true, ..clean(FREQ) });
-    let (l, _, change) = process(&mut radio, &streams, &fx);
-    assert_eq!((rms(&l), change), (0.0, Some(RxChange::Started)), "muted radios still detect reception");
+    let (l, _, receiving) = process(&mut radio, &streams, &fx);
+    assert_eq!((rms(&l), receiving), (0.0, 1), "muted radios still detect reception");
 
     let mut radio = Radio::new(clean(FREQ));
     radio.set_transmitting(true);
-    let (l, _, change) = process(&mut radio, &streams, &fx);
-    assert_eq!((rms(&l), change), (0.0, None));
+    let (l, _, _) = process(&mut radio, &streams, &fx);
+    assert_eq!(rms(&l), 0.0);
+    assert!(!radio.hears(&rx(FREQ, 1.0)), "nothing is heard while transmitting");
 }
 
 #[test]
@@ -178,8 +175,8 @@ fn effects_add_noise_and_click() {
     assert!(l.iter().all(|&s| (s - 0.34).abs() < 1e-6), "{}", l[0]);
 
     // Reception ends: the squelch click plays at 1.3 × gain.
-    let (l, _, change) = process(&mut radio, &[], &fx);
-    assert_eq!(change, Some(RxChange::Ended));
+    let (l, _, receiving) = process(&mut radio, &[], &fx);
+    assert_eq!(receiving, 0);
     assert!(l.iter().all(|&s| (s - 2.6).abs() < 1e-6));
 }
 
@@ -276,6 +273,75 @@ fn bus_reports_each_talker_per_radio() {
     assert_eq!(started.len(), 3, "{events:?}");
     assert!(started.contains(&(1, "SAS123")) && started.contains(&(2, "SAS123")) && started.contains(&(3, "NAX45F")));
     assert_eq!(ended, [(3, "NAX45F"), (1, "SAS123")], "{events:?}");
+}
+
+#[test]
+fn transmitting_mid_reception_neither_clicks_nor_loses_the_talker() {
+    let ones: Arc<[f32]> = vec![1.0; 4800].into();
+    let fx = EffectSamples { click: Some(ones), ..EffectSamples::default() };
+    let silence = [0.0; FRAME_SAMPLES];
+    let streams = [(&silence, &rx(FREQ, 1.0)[..])];
+    let peak = |l: &Frame| l.iter().fold(0f32, |m, s| m.max(s.abs()));
+    let mut radio = Radio::new(RadioSettings { frequency: FREQ, ..RadioSettings::default() });
+    for _ in 0..5 {
+        process(&mut radio, &streams, &fx);
+    }
+    radio.set_transmitting(true);
+    for _ in 0..5 {
+        assert_eq!(peak(&process(&mut radio, &streams, &fx).0), 0.0, "silent while transmitting");
+    }
+    radio.set_transmitting(false);
+    for _ in 0..5 {
+        let (l, _, receiving) = process(&mut radio, &streams, &fx);
+        assert!(peak(&l) < 0.01, "no click after releasing PTT: {}", peak(&l));
+        assert_eq!(receiving, 1);
+    }
+    let (l, _, receiving) = process(&mut radio, &[], &fx);
+    assert_eq!(receiving, 0);
+    assert!(peak(&l) > 1.0, "the click once the talker stops: {}", peak(&l));
+}
+
+#[test]
+fn bus_ends_and_resumes_reception_around_our_own_transmission() {
+    let mut bus = Bus::new(EffectSamples::default());
+    bus.set_radio(1, clean(FREQ));
+    bus.set_radio(2, RadioSettings { muted: true, ..clean(FREQ) });
+    let mut tx = Transmitter::new().unwrap();
+    tx.set_ptt(true);
+    let start = Instant::now();
+    let mut events = Vec::new();
+    let (mut l, mut r) = ([0.0; FRAME_SAMPLES], [0.0; FRAME_SAMPLES]);
+    for i in 0..70 {
+        if i == 50 {
+            tx.set_ptt(false);
+        }
+        if let Some(p) = tx.process(&sine(i, 440.0, 0.3)).unwrap() {
+            bus.push(
+                "SAS123",
+                p.sequence,
+                p.opus,
+                p.last_packet,
+                &rx(FREQ, 1.0),
+                start + Duration::from_millis(20 * i as u64),
+            )
+            .unwrap();
+        }
+        let transmitting = (20..30).contains(&i);
+        bus.set_transmitting(1, transmitting);
+        bus.render_stereo(&mut l, &mut r, |id, _, c| events.push((i, id, c)));
+        if transmitting {
+            assert_eq!(rms(&l), 0.0, "radio 1 transmits and radio 2 is muted (frame {i})");
+        }
+    }
+    let on = |radio| events.iter().filter(|e| e.1 == radio).map(|e| (e.0, e.2)).collect::<Vec<_>>();
+    let radio_1 = on(1);
+    assert_eq!(radio_1[..3], [(0, RxChange::Started), (20, RxChange::Ended), (30, RxChange::Started)], "{events:?}");
+    assert!(matches!(radio_1[3..], [(i, RxChange::Ended)] if i > 50), "{events:?}");
+    let radio_2 = on(2);
+    assert!(
+        matches!(radio_2[..], [(0, RxChange::Started), (i, RxChange::Ended)] if i > 50),
+        "muted radios report: {events:?}"
+    );
 }
 
 #[test]
@@ -380,8 +446,8 @@ fn hf_radios_do_not_click_at_the_end_of_a_transmission() {
         let mut radio = Radio::new(RadioSettings { frequency: HF, hf_squelch: squelch, ..RadioSettings::default() });
         radio.set_hf_conditions(HfConditions::OFF);
         process(&mut radio, &[(&silence, &rx(HF, 1.0))], &fx);
-        let (l, _, change) = process(&mut radio, &[], &fx);
-        assert_eq!(change, Some(RxChange::Ended), "the end is still reported");
+        let (l, _, receiving) = process(&mut radio, &[], &fx);
+        assert_eq!(receiving, 0);
         l.iter().fold(0f32, |m, s| m.max(s.abs()))
     };
     assert!(end(false) < 0.01, "no squelch, no click: {}", end(false));

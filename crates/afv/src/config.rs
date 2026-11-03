@@ -35,6 +35,8 @@ pub struct Timing {
     pub timeout_after: u32,
     /// How often the transceiver set is re-sent while connected.
     pub transceiver_refresh: Duration,
+    /// How long [`crate::Client`] waits before sending a refused transceiver update again.
+    pub transceiver_retry: Duration,
     /// Re-authenticate this long before the bearer token expires.
     pub token_refresh_margin: Duration,
     /// First delay between reconnect attempts; doubles up to `reconnect_backoff_max`.
@@ -55,6 +57,7 @@ impl Timing {
             degraded_after: consts::DEGRADED_AFTER_MISSED_HEARTBEATS,
             timeout_after: consts::TIMEOUT_AFTER_MISSED_HEARTBEATS,
             transceiver_refresh: consts::PILOT_TRANSCEIVER_REFRESH,
+            transceiver_retry: Duration::from_secs(5),
             token_refresh_margin: consts::TOKEN_REFRESH_MARGIN,
             reconnect_backoff: Duration::from_secs(1),
             reconnect_backoff_max: Duration::from_secs(30),

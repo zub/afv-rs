@@ -20,6 +20,7 @@ use tokio::sync::{broadcast, mpsc};
 
 use crate::events::Event;
 use crate::radio::{OutputBus, RadioConfig, RadioId};
+use crate::realtime::Format;
 use crate::session::Shared;
 
 const PURGE_INTERVAL: Duration = Duration::from_secs(5);
@@ -34,8 +35,8 @@ struct Engine {
     shared: Arc<Shared>,
     events: broadcast::Sender<Event>,
     incoming: Option<mpsc::Receiver<AudioRx>>,
-    headset: Bus,
-    speaker: Bus,
+    headset: BusOutput,
+    speaker: BusOutput,
     transmitter: Transmitter,
     /// Transceivers to transmit on, as last acknowledged by the server.
     tx: Vec<u16>,
@@ -43,23 +44,44 @@ struct Engine {
     tx_radios: Vec<RadioId>,
     /// Which bus each receiving radio is on.
     rx_radios: HashMap<RadioId, OutputBus>,
-    capture: Option<(u32, u16, CaptureConverter)>,
-    render_headset: Option<(u32, u16, RenderConverter)>,
-    render_speaker: Option<(u32, u16, RenderConverter)>,
+    capture: Option<(Format, CaptureConverter)>,
     last_purge: Instant,
+}
+
+/// One output bus and the converter to the format it was last rendered in.
+struct BusOutput {
+    bus: Bus,
+    converter: Option<(Format, RenderConverter)>,
+}
+
+impl BusOutput {
+    fn new(effects: EffectSamples) -> Self {
+        Self { bus: Bus::new(effects), converter: None }
+    }
+
+    fn render(
+        &mut self,
+        out: &mut [f32],
+        format: Format,
+        mut on_rx: impl FnMut(afv_audio::RadioId, &str, RxChange),
+    ) -> Result<(), ConvertError> {
+        let converter = converter(&mut self.converter, format, RenderConverter::new)?;
+        let bus = &mut self.bus;
+        converter.fill(out, |left, right| bus.render(left, right, &mut on_rx));
+        Ok(())
+    }
 }
 
 /// Recreates `slot`'s converter when the format changes.
 fn converter<C>(
-    slot: &mut Option<(u32, u16, C)>,
-    rate: u32,
-    channels: u16,
+    slot: &mut Option<(Format, C)>,
+    format: Format,
     new: impl FnOnce(u32, u16) -> Result<C, ConvertError>,
 ) -> Result<&mut C, ConvertError> {
-    if !matches!(slot, Some((r, c, _)) if *r == rate && *c == channels) {
-        *slot = Some((rate, channels, new(rate, channels)?));
+    if !matches!(slot, Some((f, _)) if *f == format) {
+        *slot = Some((format, new(format.sample_rate, format.channels)?));
     }
-    Ok(&mut slot.as_mut().expect("just set").2)
+    Ok(&mut slot.as_mut().expect("just set").1)
 }
 
 impl Audio {
@@ -73,15 +95,13 @@ impl Audio {
             shared,
             events,
             incoming,
-            headset: Bus::new(effects.clone()),
-            speaker: Bus::new(effects),
+            headset: BusOutput::new(effects.clone()),
+            speaker: BusOutput::new(effects),
             transmitter: Transmitter::new()?,
             tx: Vec::new(),
             tx_radios: Vec::new(),
             rx_radios: HashMap::new(),
             capture: None,
-            render_headset: None,
-            render_speaker: None,
             last_purge: Instant::now(),
         };
         Ok(Self { engine: Arc::new(Mutex::new(engine)) })
@@ -96,7 +116,8 @@ impl Audio {
     /// while PTT is open, is encoded and sent.
     pub fn capture(&self, samples: &[f32], sample_rate: u32, channels: u16) -> Result<(), ConvertError> {
         let engine = &mut *self.lock();
-        let converter = converter(&mut engine.capture, sample_rate, channels, CaptureConverter::new)?;
+        let format = Format { sample_rate, channels };
+        let converter = converter(&mut engine.capture, format, CaptureConverter::new)?;
         let (transmitter, shared, tx) = (&mut engine.transmitter, &engine.shared, &engine.tx);
         converter.push(samples, |frame| match transmitter.process(frame) {
             Ok(Some(packet)) if !tx.is_empty() => {
@@ -114,26 +135,18 @@ impl Audio {
     pub fn render(&self, bus: OutputBus, out: &mut [f32], sample_rate: u32, channels: u16) -> Result<(), ConvertError> {
         let engine = &mut *self.lock();
         engine.receive();
-        let slot = match bus {
-            OutputBus::Headset => &mut engine.render_headset,
-            OutputBus::Speaker => &mut engine.render_speaker,
+        let Engine { headset, speaker, events, .. } = engine;
+        let output = match bus {
+            OutputBus::Headset => headset,
+            OutputBus::Speaker => speaker,
         };
-        let converter = converter(slot, sample_rate, channels, RenderConverter::new)?;
-        let target = match bus {
-            OutputBus::Headset => &mut engine.headset,
-            OutputBus::Speaker => &mut engine.speaker,
-        };
-        let events = &engine.events;
-        converter.fill(out, |left, right| {
-            target.render(left, right, |radio, callsign, change| {
-                let (radio, callsign) = (RadioId(radio), callsign.to_owned());
-                let _ = events.send(match change {
-                    RxChange::Started => Event::RxStarted { radio, callsign },
-                    RxChange::Ended => Event::RxEnded { radio, callsign },
-                });
-            })
-        });
-        Ok(())
+        output.render(out, Format { sample_rate, channels }, |radio, callsign, change| {
+            let (radio, callsign) = (RadioId(radio), callsign.to_owned());
+            let _ = events.send(match change {
+                RxChange::Started => Event::RxStarted { radio, callsign },
+                RxChange::Ended => Event::RxEnded { radio, callsign },
+            });
+        })
     }
 
     /// Microphone gain, linear (default 1). The signal is clipped to ±1 after it.
@@ -155,21 +168,21 @@ impl Audio {
 
     /// Automatic gain control on each received station (default: on, −18 dBFS).
     pub fn set_agc(&self, enabled: bool, target_db: f64) {
-        let mut engine = self.lock();
-        engine.headset.set_agc(enabled, target_db);
-        engine.speaker.set_agc(enabled, target_db);
+        for bus in self.lock().buses() {
+            bus.set_agc(enabled, target_db);
+        }
     }
 
     /// How HF propagation sounds: mistuning, fading, noise, static and sounders (default
     /// [`HfConditions::FAIR`]). Applies to HF radios with `effects` enabled, from the next frame.
     pub fn set_hf_conditions(&self, conditions: HfConditions) {
-        let mut engine = self.lock();
-        engine.headset.set_hf_conditions(conditions);
-        engine.speaker.set_hf_conditions(conditions);
+        for bus in self.lock().buses() {
+            bus.set_hf_conditions(conditions);
+        }
     }
 
     pub fn hf_conditions(&self) -> HfConditions {
-        self.lock().headset.hf_conditions()
+        self.lock().headset.bus.hf_conditions()
     }
 
     /// Plays a sound once on `bus`.
@@ -228,9 +241,13 @@ impl Audio {
 impl Engine {
     fn bus(&mut self, bus: OutputBus) -> &mut Bus {
         match bus {
-            OutputBus::Headset => &mut self.headset,
-            OutputBus::Speaker => &mut self.speaker,
+            OutputBus::Headset => &mut self.headset.bus,
+            OutputBus::Speaker => &mut self.speaker.bus,
         }
+    }
+
+    fn buses(&mut self) -> [&mut Bus; 2] {
+        [&mut self.headset.bus, &mut self.speaker.bus]
     }
 
     /// Moves received packets into the buses whose radios can hear them.
@@ -238,7 +255,7 @@ impl Engine {
         let now = Instant::now();
         if let Some(incoming) = &mut self.incoming {
             while let Ok(packet) = incoming.try_recv() {
-                for bus in [&mut self.headset, &mut self.speaker] {
+                for bus in [&mut self.headset.bus, &mut self.speaker.bus] {
                     if bus.hears(&packet.transceivers)
                         && let Err(e) = bus.push(
                             &packet.callsign,
@@ -256,8 +273,9 @@ impl Engine {
         }
         if now.duration_since(self.last_purge) > PURGE_INTERVAL {
             self.last_purge = now;
-            self.headset.purge_idle(now, STREAM_IDLE_TIMEOUT);
-            self.speaker.purge_idle(now, STREAM_IDLE_TIMEOUT);
+            for bus in self.buses() {
+                bus.purge_idle(now, STREAM_IDLE_TIMEOUT);
+            }
         }
     }
 }

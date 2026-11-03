@@ -5,11 +5,11 @@
 //! last. On VHF, simultaneous transmissions are combined as beating AM carriers ([`AmChannel`]);
 //! on HF, where the set also hears the atmosphere, they simply add up.
 
-use afv_proto::consts::HF_UPPER_LIMIT_HZ;
+use afv_proto::consts::is_hf;
 use afv_proto::voice::RxTransceiver;
 
 use crate::dsp::{AmChannel, Atmospherics, Carrier, HfConditions, HfHardware, RadioSet, VhfHardware};
-use crate::effects::{EffectSamples, SamplePlayer};
+use crate::effects::{EffectSamples, SamplePlayer, Samples};
 use crate::{FRAME_SAMPLES, Frame};
 
 const CLICK_GAIN: f32 = 1.3;
@@ -131,10 +131,6 @@ pub struct Radio {
     fetch: Box<Frame>,
 }
 
-fn is_hf(frequency: u32) -> bool {
-    frequency < HF_UPPER_LIMIT_HZ
-}
-
 /// Which set a radio's settings call for.
 #[derive(PartialEq)]
 enum SetChoice {
@@ -157,6 +153,37 @@ fn mix(dst: &mut Frame, src: &Frame, gain: f32) {
     for (d, s) in dst.iter_mut().zip(src) {
         *d += gain * s;
     }
+}
+
+/// The background a radio set plays while its squelch is open.
+#[derive(Debug, Clone, Copy)]
+struct Background {
+    /// The HF receiver's own noise floor, static and sounders ([`Atmospherics`]).
+    atmosphere: bool,
+    hf_noise: f32,
+    vhf_noise: f32,
+    ac_bus: f32,
+}
+
+impl Background {
+    fn for_band(hf: bool, hf_squelch: bool) -> Self {
+        if hf {
+            let open = !hf_squelch;
+            Self {
+                atmosphere: open,
+                hf_noise: if open { HF_NOISE_GAIN } else { 0.0 },
+                vhf_noise: 0.0,
+                ac_bus: HF_AC_BUS_GAIN,
+            }
+        } else {
+            Self { atmosphere: false, hf_noise: 0.0, vhf_noise: VHF_NOISE_GAIN, ac_bus: AC_BUS_GAIN }
+        }
+    }
+}
+
+/// The strongest of `transceivers` on `frequency`, as a `DistanceRatio`; `None` if none is on it.
+fn strongest(transceivers: &[RxTransceiver], frequency: u32) -> Option<f32> {
+    transceivers.iter().filter(|t| t.frequency == frequency).map(|t| t.distance_ratio).reduce(f32::max)
 }
 
 impl Radio {
@@ -187,7 +214,7 @@ impl Radio {
     /// change of band or of the set for it switches to that set.
     pub fn set_settings(&mut self, settings: RadioSettings) {
         if settings.frequency != self.settings.frequency {
-            self.reset_effects(true);
+            self.reset_effects();
         }
         let (old, new) = (set_choice(&self.settings), set_choice(&settings));
         self.settings = settings;
@@ -210,16 +237,30 @@ impl Radio {
         self.transmitting
     }
 
-    /// Number of streams received in the last processed frame.
+    /// Whether a talker received on `transceivers` is heard on this radio: one of them is on its
+    /// frequency, and the radio is not transmitting.
+    pub fn hears(&self, transceivers: &[RxTransceiver]) -> bool {
+        !self.transmitting && self.tuned_to(transceivers)
+    }
+
+    /// Whether one of `transceivers` is on this radio's frequency.
+    pub fn tuned_to(&self, transceivers: &[RxTransceiver]) -> bool {
+        strongest(transceivers, self.settings.frequency).is_some()
+    }
+
+    /// Whether this radio applies HF propagation to what it hears.
+    pub fn simulates_hf(&self) -> bool {
+        self.settings.effects && is_hf(self.settings.frequency)
+    }
+
+    /// Number of streams on the radio's frequency in the last processed frame, counted even while
+    /// transmitting.
     pub fn receiving(&self) -> u32 {
         self.rx_count
     }
 
-    fn reset_effects(&mut self, keep_click: bool) {
-        if !keep_click {
-            self.click = None;
-            self.rx_count = 0;
-        }
+    /// Stops the background and resets the set. A pending click plays on.
+    fn reset_effects(&mut self) {
         self.crackle = None;
         self.atmospherics.reset();
         self.set.reset();
@@ -250,110 +291,33 @@ impl Radio {
         signals: impl Iterator<Item = Signal<'a>>,
         effects: &EffectSamples,
         output: Output<'_>,
-    ) -> Option<RxChange> {
+    ) {
         let RadioSettings { frequency, gain, effects: fx_on, hf_squelch, muted, .. } = self.settings;
-        let ignore = self.transmitting;
-        if ignore {
-            self.reset_effects(true);
-        }
-        self.channel.fill(0.0);
-
         let hf = is_hf(frequency);
-        let audible = !ignore && !muted;
-        let (mut crackle_gain, mut hf_gain, mut vhf_gain, mut ac_gain) = (0f32, 0f32, 0f32, 0f32);
-        let mut count = 0;
-        self.am.begin();
-        for signal in signals {
-            // The strongest of our transceivers that hears this talker on this frequency.
-            let Some(ratio) = signal
-                .transceivers
-                .iter()
-                .filter(|t| t.frequency == frequency)
-                .map(|t| t.distance_ratio)
-                .reduce(f32::max)
-            else {
-                continue;
-            };
-            let mut voice_gain = 1.0f32;
-            if fx_on {
-                let crackle = weak_signal_crackle(ratio);
-                if hf {
-                    hf_gain = if hf_squelch { 0.0 } else { HF_NOISE_GAIN };
-                    vhf_gain = 0.0;
-                    ac_gain = HF_AC_BUS_GAIN;
-                } else {
-                    hf_gain = 0.0;
-                    vhf_gain = VHF_NOISE_GAIN;
-                    ac_gain = AC_BUS_GAIN;
-                    crackle_gain += crackle * CRACKLE_PLAYBACK_GAIN;
-                    voice_gain = (1.0 - crackle as f64 * CRACKLE_VOICE_DUCKING) as f32;
-                }
-            }
-            if audible {
-                mix(&mut self.channel, signal.audio, voice_gain);
-                if !hf {
-                    self.am.add(signal.audio, voice_gain, carrier_level(ratio), signal.carrier);
-                }
-            }
-            count += 1;
+        if self.transmitting {
+            self.reset_effects();
         }
-        if audible && !hf && count > 1 {
-            self.am.detect(&mut self.channel);
-        } else {
-            self.am.idle();
-        }
+        let audible = !self.transmitting && !muted;
         // HF sets have no squelch: unless `hf_squelch` asks for one, the receiver's background
         // plays whether or not anyone is transmitting (skipped while it cannot be heard anyway).
         let unsquelched = hf && fx_on && !hf_squelch;
-        let open_hf = unsquelched && audible;
-        if open_hf {
-            (hf_gain, vhf_gain, ac_gain) = (HF_NOISE_GAIN, 0.0, HF_AC_BUS_GAIN);
-        }
 
-        let mut change = None;
-        if count > 0 && self.rx_count == 0 && !ignore {
-            change = Some(RxChange::Started);
-        }
-        if count > 0 || open_hf {
+        let (count, crackle_gain) = self.receive(signals, hf, fx_on, audible);
+        if count > 0 || (unsquelched && audible) {
             if fx_on {
-                if hf {
-                    // What an SSB receiver hears: noise, static and sounders added to the signal,
-                    // all through the set's sideband filter.
-                    if hf_gain > 0.0 {
-                        self.fetch.fill(0.0);
-                        self.atmospherics.add(&self.hf_conditions, &mut self.fetch);
-                        mix(&mut self.channel, &self.fetch, 1.0);
-                    }
-                }
-                self.set.process(&mut self.channel[..]);
-                let start = |p: &mut Option<SamplePlayer>, samples: &Option<crate::effects::Samples>| {
-                    if p.is_none() {
-                        *p = samples.clone().map(|s| SamplePlayer::new(s, true));
-                    }
-                };
-                start(&mut self.vhf_noise, &effects.vhf_noise);
-                start(&mut self.hf_noise, &effects.hf_noise);
-                start(&mut self.crackle, &effects.crackle);
-                start(&mut self.ac_bus, &effects.ac_bus);
-                Self::mix_effect(&mut self.crackle, crackle_gain, &mut self.channel, &mut self.fetch);
-                Self::mix_effect(&mut self.hf_noise, hf_gain, &mut self.channel, &mut self.fetch);
-                Self::mix_effect(&mut self.vhf_noise, vhf_gain, &mut self.channel, &mut self.fetch);
-                Self::mix_effect(&mut self.ac_bus, ac_gain, &mut self.channel, &mut self.fetch);
+                self.play_set(effects, Background::for_band(hf, hf_squelch), crackle_gain);
             }
         } else {
-            self.reset_effects(true);
+            self.reset_effects();
         }
-        if count == 0 && self.rx_count > 0 {
-            // The squelch closing; an HF receiver without one has nothing to click.
-            if !unsquelched {
-                self.click = effects.click.clone().map(|s| SamplePlayer::new(s, false));
-            }
-            change = Some(RxChange::Ended);
+        // The squelch closing; an HF receiver without one has nothing to click.
+        if count == 0 && self.rx_count > 0 && !unsquelched {
+            self.click = effects.click.clone().map(|s| SamplePlayer::new(s, false));
         }
         self.rx_count = count;
         Self::mix_effect(&mut self.click, CLICK_GAIN, &mut self.channel, &mut self.fetch);
 
-        if !ignore && !muted {
+        if audible {
             match output {
                 Output::Mono(out) => mix(out, &self.channel, gain),
                 Output::Stereo { left, right } => {
@@ -366,6 +330,66 @@ impl Radio {
                 }
             }
         }
-        change
+    }
+
+    /// Mixes the voices on this radio's frequency into `channel`. Returns how many there were,
+    /// and how loud weak VHF signals make the crackle.
+    fn receive<'a>(
+        &mut self,
+        signals: impl Iterator<Item = Signal<'a>>,
+        hf: bool,
+        fx_on: bool,
+        audible: bool,
+    ) -> (u32, f32) {
+        let frequency = self.settings.frequency;
+        let (mut count, mut crackle_gain) = (0, 0f32);
+        self.channel.fill(0.0);
+        self.am.begin();
+        for signal in signals {
+            let Some(ratio) = strongest(signal.transceivers, frequency) else { continue };
+            count += 1;
+            // A weak VHF signal crackles, and its voice is turned down to match. HF has its own
+            // atmosphere instead.
+            let crackle = if fx_on && !hf { weak_signal_crackle(ratio) } else { 0.0 };
+            crackle_gain += crackle * CRACKLE_PLAYBACK_GAIN;
+            if audible {
+                let voice_gain = (1.0 - crackle as f64 * CRACKLE_VOICE_DUCKING) as f32;
+                mix(&mut self.channel, signal.audio, voice_gain);
+                if !hf {
+                    self.am.add(signal.audio, voice_gain, carrier_level(ratio), signal.carrier);
+                }
+            }
+        }
+        if audible && !hf && count > 1 {
+            self.am.detect(&mut self.channel);
+        } else {
+            self.am.idle();
+        }
+        (count, crackle_gain)
+    }
+
+    /// Runs `channel` through the radio set and adds the background it plays.
+    fn play_set(&mut self, effects: &EffectSamples, background: Background, crackle_gain: f32) {
+        if background.atmosphere {
+            // What an SSB receiver hears: noise, static and sounders added to the signal, all
+            // through the set's sideband filter.
+            self.fetch.fill(0.0);
+            self.atmospherics.add(&self.hf_conditions, &mut self.fetch);
+            mix(&mut self.channel, &self.fetch, 1.0);
+        }
+        self.set.process(&mut self.channel[..]);
+        let start = |p: &mut Option<SamplePlayer>, samples: &Option<Samples>| {
+            if p.is_none() {
+                *p = samples.clone().map(|s| SamplePlayer::new(s, true));
+            }
+        };
+        start(&mut self.vhf_noise, &effects.vhf_noise);
+        start(&mut self.hf_noise, &effects.hf_noise);
+        start(&mut self.crackle, &effects.crackle);
+        start(&mut self.ac_bus, &effects.ac_bus);
+        Self::mix_effect(&mut self.crackle, crackle_gain, &mut self.channel, &mut self.fetch);
+        Self::mix_effect(&mut self.hf_noise, background.hf_noise, &mut self.channel, &mut self.fetch);
+        Self::mix_effect(&mut self.vhf_noise, background.vhf_noise, &mut self.channel, &mut self.fetch);
+        Self::mix_effect(&mut self.ac_bus, background.ac_bus, &mut self.channel, &mut self.fetch);
     }
 }
