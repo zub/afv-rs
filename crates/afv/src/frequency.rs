@@ -1,6 +1,12 @@
 use std::fmt;
 use std::str::FromStr;
 
+const HZ_PER_MHZ: u32 = 1_000_000;
+/// Decimal places of MHz that resolve 1 Hz…
+const MHZ_DECIMALS: usize = 6;
+/// …and the fewest shown, as frequencies are usually written.
+const MHZ_DECIMALS_SHOWN: usize = 3;
+
 /// A radio frequency in Hz, written in MHz: `"122.800"`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub struct Frequency(u32);
@@ -16,7 +22,7 @@ impl Frequency {
     ///
     /// If `mhz` is negative, not finite or above 4294.967295 MHz.
     pub fn mhz(mhz: f64) -> Self {
-        let hz = (mhz * 1e6).round();
+        let hz = (mhz * HZ_PER_MHZ as f64).round();
         assert!(hz.is_finite() && (0.0..=u32::MAX as f64).contains(&hz), "frequency {mhz} MHz out of range");
         Self(hz as u32)
     }
@@ -34,10 +40,10 @@ impl Frequency {
 impl fmt::Display for Frequency {
     /// MHz with at least three decimals: `122.800`, `8.891`, `118.0125`.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let (mhz, hz) = (self.0 / 1_000_000, self.0 % 1_000_000);
-        let fraction = format!("{hz:06}");
+        let (mhz, hz) = (self.0 / HZ_PER_MHZ, self.0 % HZ_PER_MHZ);
+        let fraction = format!("{hz:0MHZ_DECIMALS$}");
         let fraction = fraction.trim_end_matches('0');
-        write!(f, "{mhz}.{fraction:0<3}")
+        write!(f, "{mhz}.{fraction:0<MHZ_DECIMALS_SHOWN$}")
     }
 }
 
@@ -57,12 +63,12 @@ impl FromStr for Frequency {
             Some(_) => return Err(err()),
             None => (s.trim(), ""),
         };
-        if !digits(mhz) || fraction.len() > 6 {
+        if !digits(mhz) || fraction.len() > MHZ_DECIMALS {
             return Err(err());
         }
         let mhz: u64 = mhz.parse().map_err(|_| err())?;
-        let fraction: u64 = format!("{fraction:0<6}").parse().map_err(|_| err())?;
-        let hz = mhz.checked_mul(1_000_000).and_then(|h| h.checked_add(fraction)).ok_or_else(err)?;
+        let fraction: u64 = format!("{fraction:0<MHZ_DECIMALS$}").parse().map_err(|_| err())?;
+        let hz = mhz.checked_mul(HZ_PER_MHZ as u64).and_then(|h| h.checked_add(fraction)).ok_or_else(err)?;
         u32::try_from(hz).map(Self).map_err(|_| err())
     }
 }

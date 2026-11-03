@@ -11,7 +11,7 @@ use afv_proto::consts::HF_UPPER_LIMIT_HZ;
 use afv_proto::voice::RxTransceiver;
 
 use crate::codec::OpusError;
-use crate::dsp::{Carrier, HfChannel, HfConditions};
+use crate::dsp::{Carrier, HfChannel, HfConditions, RmsAgc};
 use crate::effects::{EffectSamples, SamplePlayer, Samples};
 use crate::radio::{Output, Radio, RadioSettings, RxChange, Signal};
 use crate::stream::RemoteStream;
@@ -56,7 +56,7 @@ impl Bus {
             sounds: Vec::new(),
             fetch: Box::new([0.0; FRAME_SAMPLES]),
             agc_enabled: true,
-            agc_target_db: -18.0,
+            agc_target_db: RmsAgc::DEFAULT_TARGET_DB,
             hf_conditions: HfConditions::default(),
         }
     }

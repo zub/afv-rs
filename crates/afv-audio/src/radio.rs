@@ -14,7 +14,21 @@ const AC_BUS_GAIN: f32 = 0.005;
 const HF_AC_BUS_GAIN: f32 = 0.001;
 const VHF_NOISE_GAIN: f32 = 0.17;
 const HF_NOISE_GAIN: f32 = 0.16;
-const HF_VOICE_GAIN: f32 = 0.20;
+/// afv-native's weak-signal crackle on VHF: `e^d · d^POWER / DIVISOR − OFFSET` for a
+/// `DistanceRatio` d, clamped to 0‥MAX. OFFSET is e/350, so a full-strength signal has none.
+const CRACKLE_POWER: f64 = -4.0;
+const CRACKLE_DIVISOR: f64 = 350.0;
+const CRACKLE_OFFSET: f64 = 0.00776652;
+const CRACKLE_MAX: f32 = 0.20;
+/// The crackle recording plays at this multiple of the crackle amount…
+const CRACKLE_PLAYBACK_GAIN: f32 = 2.0;
+/// …and the voice is turned down by this multiple of it.
+const CRACKLE_VOICE_DUCKING: f64 = 3.7;
+/// Weakest carrier for the AM model, so that even a signal at the edge of range takes part.
+const CARRIER_LEVEL_FLOOR: f32 = 0.01;
+
+/// afv-native plays HF voice at this gain; the HF background levels are set relative to it.
+pub(crate) const HF_VOICE_GAIN: f32 = 0.20;
 
 /// Which side(s) of a stereo output a radio plays on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
@@ -75,7 +89,16 @@ pub struct Signal<'a> {
 fn carrier_level(distance_ratio: f32) -> f32 {
     // `max`/`min` rather than `clamp` so that NaN maps to the weakest signal.
     #[allow(clippy::manual_clamp)]
-    distance_ratio.max(0.01).min(1.0)
+    distance_ratio.max(CARRIER_LEVEL_FLOOR).min(1.0)
+}
+
+/// How much crackle a signal of this `DistanceRatio` gets (0 at full strength, up to [`CRACKLE_MAX`]).
+fn weak_signal_crackle(distance_ratio: f32) -> f32 {
+    let d = distance_ratio as f64;
+    let crackle = ((d.exp() * d.powf(CRACKLE_POWER) / CRACKLE_DIVISOR) - CRACKLE_OFFSET) as f32;
+    // fmax/fmin semantics as in the original: NaN maps to the bound, unlike `clamp`.
+    #[allow(clippy::manual_clamp)]
+    crackle.max(0.0).min(CRACKLE_MAX)
 }
 
 /// Where a radio's processed audio goes.
@@ -234,11 +257,7 @@ impl Radio {
             };
             let mut voice_gain = 1.0f32;
             if fx_on {
-                let d = ratio as f64;
-                let crackle = ((d.exp() * d.powf(-4.0) / 350.0) - 0.00776652) as f32;
-                // fmax/fmin semantics as in the original: NaN maps to the bound, unlike `clamp`.
-                #[allow(clippy::manual_clamp)]
-                let crackle = crackle.max(0.0).min(0.20);
+                let crackle = weak_signal_crackle(ratio);
                 if hf {
                     hf_gain = if hf_squelch { 0.0 } else { HF_NOISE_GAIN };
                     vhf_gain = 0.0;
@@ -248,8 +267,8 @@ impl Radio {
                     hf_gain = 0.0;
                     vhf_gain = VHF_NOISE_GAIN;
                     ac_gain = AC_BUS_GAIN;
-                    crackle_gain += crackle * 2.0;
-                    voice_gain = (1.0 - crackle as f64 * 3.7) as f32;
+                    crackle_gain += crackle * CRACKLE_PLAYBACK_GAIN;
+                    voice_gain = (1.0 - crackle as f64 * CRACKLE_VOICE_DUCKING) as f32;
                 }
             }
             if audible {

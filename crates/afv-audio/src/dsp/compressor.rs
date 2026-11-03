@@ -35,6 +35,41 @@ fn fix(v: f32, default: f32) -> f32 {
     if v.is_finite() { v } else { default }
 }
 
+// `sf_defaultcomp`, the settings afv-native uses for every radio.
+const DEFAULT_PREGAIN_DB: f32 = 0.0;
+const DEFAULT_THRESHOLD_DB: f32 = -30.0;
+const DEFAULT_KNEE_DB: f32 = 30.0;
+const DEFAULT_RATIO: f32 = 12.0;
+const DEFAULT_ATTACK_S: f32 = 0.003;
+const DEFAULT_RELEASE_S: f32 = 0.250;
+const DEFAULT_PREDELAY_S: f32 = 0.006;
+/// Release time, as fractions of the release time, while 12, 9, 6 and 3 dB of gain remain to be
+/// recovered: fast out of deep compression, slowing towards the end.
+const DEFAULT_RELEASE_ZONES: [f32; 4] = [0.090, 0.160, 0.420, 0.980];
+const DEFAULT_POSTGAIN_DB: f32 = 0.0;
+const DEFAULT_WET: f32 = 1.0;
+
+// Tuning inside sndfilter (and Chromium's `DynamicsCompressorKernel`, which it follows).
+/// The knee's curvature `k` is found by bisection from this start, within this range, in this
+/// many steps.
+const KNEE_K_START: f32 = 5.0;
+const KNEE_K_RANGE: (f32, f32) = (0.1, 10_000.0);
+const KNEE_K_STEPS: usize = 15;
+/// The detector releases from saturation over this time, at least this many dB at a time.
+const SATURATION_RELEASE_S: f32 = 0.0025;
+const SATURATION_MIN_DB: f32 = 2.0;
+/// Make-up gain is the full-scale reduction raised to this power (an empirical choice).
+const MAKEUP_EXPONENT: f32 = 0.6;
+/// The release curve covers up to this much compression, mapped onto the four zones.
+const RELEASE_RANGE_DB: f32 = 12.0;
+const RELEASE_ZONES_PER_DB: f32 = 0.25;
+/// Attack aims to reach this fraction of the remaining reduction per attack time, never slower
+/// than for this many dB.
+const ATTACK_RESIDUE: f32 = 0.25;
+const ATTACK_MIN_DB: f32 = 0.5;
+/// Below this the input counts as silence and needs no compression.
+const SILENCE: f32 = 0.0001;
+
 #[derive(Debug, Clone)]
 pub struct Compressor {
     threshold: f32,
@@ -66,7 +101,19 @@ pub struct Compressor {
 impl Compressor {
     /// `sf_defaultcomp`: the settings afv-native uses for every radio.
     pub fn default_for_rate(rate: u32) -> Self {
-        Self::new(rate, 0.0, -30.0, 30.0, 12.0, 0.003, 0.250, 0.006, [0.090, 0.160, 0.420, 0.980], 0.0, 1.0)
+        Self::new(
+            rate,
+            DEFAULT_PREGAIN_DB,
+            DEFAULT_THRESHOLD_DB,
+            DEFAULT_KNEE_DB,
+            DEFAULT_RATIO,
+            DEFAULT_ATTACK_S,
+            DEFAULT_RELEASE_S,
+            DEFAULT_PREDELAY_S,
+            DEFAULT_RELEASE_ZONES,
+            DEFAULT_POSTGAIN_DB,
+            DEFAULT_WET,
+        )
     }
 
     /// `sf_advancecomp`.
@@ -89,13 +136,13 @@ impl Compressor {
         let slope = 1.0 / ratio;
         let release_samples = rate as f32 * release;
 
-        let mut k = 5.0f32;
+        let mut k = KNEE_K_START;
         let mut knee_db_offset = 0.0;
         let mut linear_threshold_knee = 0.0;
         if knee > 0.0 {
             let x_knee = db_to_lin(threshold + knee);
-            let (mut min_k, mut max_k) = (0.1f32, 10_000.0f32);
-            for _ in 0..15 {
+            let (mut min_k, mut max_k) = KNEE_K_RANGE;
+            for _ in 0..KNEE_K_STEPS {
                 if knee_slope(x_knee, k, linear_threshold) < slope {
                     max_k = k;
                 } else {
@@ -114,7 +161,7 @@ impl Compressor {
             linear_threshold,
             slope,
             attack_samples_inv: 1.0 / (rate as f32 * attack),
-            sat_release_samples_inv: 1.0 / (rate as f32 * 0.0025),
+            sat_release_samples_inv: 1.0 / (rate as f32 * SATURATION_RELEASE_S),
             wet,
             dry: 1.0 - wet,
             k,
@@ -136,8 +183,9 @@ impl Compressor {
             delay: Box::new([0.0; MAX_DELAY]),
         };
         let full_level = c.comp_curve(1.0);
-        c.master_gain = db_to_lin(postgain) * (1.0 / full_level).powf(0.6);
+        c.master_gain = db_to_lin(postgain) * (1.0 / full_level).powf(MAKEUP_EXPONENT);
 
+        // The cubic through the four release zones at x = 0, 1, 2, 3.
         let [y1, y2, y3, y4] = release_zones.map(|z| release_samples * z);
         c.a = (-y1 + 3.0 * y2 - 3.0 * y3 + y4) / 6.0;
         c.b = y1 - 2.5 * y2 + 2.0 * y3 - 0.5 * y4;
@@ -177,7 +225,7 @@ impl Compressor {
                 // Releasing.
                 comp_diff_db = fix(comp_diff_db, -1.0);
                 self.max_comp_diff_db = -1.0;
-                let x = (comp_diff_db.clamp(-12.0, 0.0) + 12.0) * 0.25;
+                let x = (comp_diff_db.clamp(-RELEASE_RANGE_DB, 0.0) + RELEASE_RANGE_DB) * RELEASE_ZONES_PER_DB;
                 db_to_lin(SPACING_DB / self.adaptive_release(x))
             } else {
                 // Attacking.
@@ -185,8 +233,8 @@ impl Compressor {
                 if self.max_comp_diff_db == -1.0 || self.max_comp_diff_db < comp_diff_db {
                     self.max_comp_diff_db = comp_diff_db;
                 }
-                let attenuate = self.max_comp_diff_db.max(0.5);
-                1.0 - (0.25 / attenuate).powf(self.attack_samples_inv)
+                let attenuate = self.max_comp_diff_db.max(ATTACK_MIN_DB);
+                1.0 - (ATTACK_RESIDUE / attenuate).powf(self.attack_samples_inv)
             };
 
             for sample in chunk {
@@ -194,10 +242,10 @@ impl Compressor {
                 self.delay[self.delay_write] = input;
 
                 let input_max = input.abs();
-                let attenuation = if input_max < 0.0001 { 1.0 } else { self.comp_curve(input_max) / input_max };
+                let attenuation = if input_max < SILENCE { 1.0 } else { self.comp_curve(input_max) / input_max };
 
                 let rate = if attenuation > self.detector_avg {
-                    let attenuation_db = (-lin_to_db(attenuation)).max(2.0);
+                    let attenuation_db = (-lin_to_db(attenuation)).max(SATURATION_MIN_DB);
                     db_to_lin(attenuation_db * self.sat_release_samples_inv) - 1.0
                 } else {
                     1.0

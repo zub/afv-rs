@@ -21,6 +21,8 @@ use crate::error::{Error, Result};
 use crate::liveness::{Liveness, Transition};
 
 const INCOMING_AUDIO_CAPACITY: usize = 512;
+/// The largest UDP datagram that can arrive.
+const MAX_DATAGRAM: usize = 65_536;
 const TOKEN_RETRY_DELAY: Duration = Duration::from_secs(10);
 /// Socket errors tolerated within [`SOCKET_ERROR_WINDOW`] before the link is considered lost.
 const SOCKET_ERROR_LIMIT: u32 = 3;
@@ -431,7 +433,7 @@ impl Shared {
         refresh.set_missed_tick_behavior(MissedTickBehavior::Delay);
         let mut token_task: Option<JoinHandle<Result<Instant>>> = None;
         let mut socket_errors = ErrorWindow::default();
-        let mut buf = vec![0u8; 65_536];
+        let mut buf = vec![0u8; MAX_DATAGRAM];
         let callsign = self.api.config().callsign.clone();
 
         loop {

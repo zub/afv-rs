@@ -15,6 +15,19 @@ pub enum Hardware {
     Garex220,
 }
 
+// afv-native's settings. The expander (a compressor with a ratio above 1) steepens levels above
+// its threshold; the limiter catches the result.
+const EXPANDER_ATTACK_MS: f64 = 0.1;
+const EXPANDER_RELEASE_MS: f64 = 80.0;
+const EXPANDER_THRESHOLD_DB: f64 = -8.0;
+const EXPANDER_RATIO: f64 = 6.0;
+const LIMITER_ATTACK_MS: f64 = 0.1;
+const LIMITER_RELEASE_MS: f64 = 80.0;
+const LIMITER_THRESHOLD_DB: f64 = 8.0;
+const POST_GAIN_DB: f64 = -5.5;
+/// ChunkWare's default sample rate, in effect when afv-native sets the limiter's attack.
+const ORIGINAL_DEFAULT_RATE: f64 = 44_100.0;
+
 #[derive(Debug, Clone)]
 pub struct HardwareFilter {
     hardware: Hardware,
@@ -28,14 +41,19 @@ impl HardwareFilter {
     pub fn new(hardware: Hardware) -> Self {
         let rate = SAMPLE_RATE as f64;
         // In the original the limiter's look-ahead is computed when the attack is set, before the
-        // sample rate is changed from its 44.1 kHz default: int(0.001 * 0.1 ms * 44100) = 4.
-        let peak_hold = (0.001 * 0.1 * 44_100.0) as usize;
+        // sample rate is changed from its default: int(0.001 · 0.1 ms · 44100) = 4.
+        let peak_hold = (0.001 * LIMITER_ATTACK_MS * ORIGINAL_DEFAULT_RATE) as usize;
         Self {
             hardware,
-            // Ratio 6 expands above -8 dBFS.
-            expander: SimpleComp::new(rate, 0.1, 80.0, -8.0, 6.0),
-            limiter: SimpleLimit::new(rate, 0.1, 80.0, 8.0, peak_hold),
-            post_gain: 10f64.powf(-5.5 / 20.0) as f32,
+            expander: SimpleComp::new(
+                rate,
+                EXPANDER_ATTACK_MS,
+                EXPANDER_RELEASE_MS,
+                EXPANDER_THRESHOLD_DB,
+                EXPANDER_RATIO,
+            ),
+            limiter: SimpleLimit::new(rate, LIMITER_ATTACK_MS, LIMITER_RELEASE_MS, LIMITER_THRESHOLD_DB, peak_hold),
+            post_gain: 10f64.powf(POST_GAIN_DB / 20.0) as f32,
             filters: presets(hardware),
         }
     }
@@ -68,38 +86,68 @@ impl HardwareFilter {
     }
 }
 
-fn presets(hardware: Hardware) -> Vec<Biquad> {
-    let r = SAMPLE_RATE as f32;
-    match hardware {
-        Hardware::SchmidEd137b => vec![
-            Biquad::high_pass(r, 310.0, 0.25),
-            Biquad::peaking_eq(r, 450.0, 0.75, 12.0),
-            Biquad::peaking_eq(r, 1450.0, 1.0, 20.0),
-            Biquad::peaking_eq(r, 2000.0, 1.0, 20.0),
-            Biquad::low_pass(r, 2500.0, 0.25),
-        ],
-        Hardware::Garex220 => vec![
-            Biquad::high_pass(r, 300.0, 0.25),
-            Biquad::high_shelf(r, 400.0, 1.0, 8.0),
-            Biquad::high_shelf(r, 600.0, 1.0, 4.0),
-            Biquad::low_shelf(r, 2000.0, 1.0, 1.0),
-            Biquad::low_shelf(r, 2400.0, 1.0, 3.0),
-            Biquad::low_shelf(r, 3000.0, 1.0, 10.0),
-            Biquad::low_pass(r, 3400.0, 0.25),
-        ],
-        Hardware::RockwellCollins2100 => [
-            [1.0, 0.0, 0.0, -0.01, 0.0, 0.0],
-            [1.0, -1.7152995098277, 0.761385315196423, 0.0, 1.0, 0.753162969638192],
-            [1.0, -1.71626681678914, 0.762433947105989, 1.0, -2.29278115712509, 1.000336632935775],
-            [1.0, -1.79384214686345, 0.909678364879526, 1.0, -2.05042803669041, 1.05048374237779],
-            [1.0, -1.79409285259567, 0.909822671281377, 1.0, -1.95188929743297, 0.951942325888074],
-            [1.0, -1.9390093095185, 0.9411847259142, 1.0, -1.82547932903698, 1.09157529229851],
-            [1.0, -1.94022767750807, 0.942630574503006, 1.0, -1.67241244173042, 0.916184578658119],
-        ]
-        .iter()
-        .map(|&[aa0, aa1, aa2, b0, b1, b2]| Biquad::from_coefficients(aa0, aa1, aa2, b0, b1, b2))
-        .collect(),
+/// One stage of an EQ preset: frequency in Hz, Q, and gain in dB where it applies.
+#[derive(Debug, Clone, Copy)]
+enum Stage {
+    HighPass(f32, f32),
+    LowPass(f32, f32),
+    Peak(f32, f32, f32),
+    LowShelf(f32, f32, f32),
+    HighShelf(f32, f32, f32),
+    /// Raw coefficients `[aa0, aa1, aa2, b0, b1, b2]`.
+    Raw([f64; 6]),
+}
+
+use Stage::*;
+
+// afv-native's presets (`VHFFilterSource`).
+const SCHMID_ED137B: &[Stage] = &[
+    HighPass(310.0, 0.25),
+    Peak(450.0, 0.75, 12.0),
+    Peak(1450.0, 1.0, 20.0),
+    Peak(2000.0, 1.0, 20.0),
+    LowPass(2500.0, 0.25),
+];
+const GAREX_220: &[Stage] = &[
+    HighPass(300.0, 0.25),
+    HighShelf(400.0, 1.0, 8.0),
+    HighShelf(600.0, 1.0, 4.0),
+    LowShelf(2000.0, 1.0, 1.0),
+    LowShelf(2400.0, 1.0, 3.0),
+    LowShelf(3000.0, 1.0, 10.0),
+    LowPass(3400.0, 0.25),
+];
+const ROCKWELL_COLLINS_2100: &[Stage] = &[
+    Raw([1.0, 0.0, 0.0, -0.01, 0.0, 0.0]),
+    Raw([1.0, -1.7152995098277, 0.761385315196423, 0.0, 1.0, 0.753162969638192]),
+    Raw([1.0, -1.71626681678914, 0.762433947105989, 1.0, -2.29278115712509, 1.000336632935775]),
+    Raw([1.0, -1.79384214686345, 0.909678364879526, 1.0, -2.05042803669041, 1.05048374237779]),
+    Raw([1.0, -1.79409285259567, 0.909822671281377, 1.0, -1.95188929743297, 0.951942325888074]),
+    Raw([1.0, -1.9390093095185, 0.9411847259142, 1.0, -1.82547932903698, 1.09157529229851]),
+    Raw([1.0, -1.94022767750807, 0.942630574503006, 1.0, -1.67241244173042, 0.916184578658119]),
+];
+
+impl Stage {
+    fn biquad(self) -> Biquad {
+        let r = SAMPLE_RATE as f32;
+        match self {
+            HighPass(f, q) => Biquad::high_pass(r, f, q),
+            LowPass(f, q) => Biquad::low_pass(r, f, q),
+            Peak(f, q, db) => Biquad::peaking_eq(r, f, q, db),
+            LowShelf(f, q, db) => Biquad::low_shelf(r, f, q, db),
+            HighShelf(f, q, db) => Biquad::high_shelf(r, f, q, db),
+            Raw([aa0, aa1, aa2, b0, b1, b2]) => Biquad::from_coefficients(aa0, aa1, aa2, b0, b1, b2),
+        }
     }
+}
+
+fn presets(hardware: Hardware) -> Vec<Biquad> {
+    let stages = match hardware {
+        Hardware::SchmidEd137b => SCHMID_ED137B,
+        Hardware::RockwellCollins2100 => ROCKWELL_COLLINS_2100,
+        Hardware::Garex220 => GAREX_220,
+    };
+    stages.iter().map(|s| s.biquad()).collect()
 }
 
 #[cfg(test)]

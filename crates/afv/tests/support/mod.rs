@@ -132,6 +132,7 @@ pub fn fast_timing() -> Timing {
         reconnect_backoff: Duration::from_millis(20),
         reconnect_backoff_max: Duration::from_millis(100),
         http_timeout: Duration::from_secs(2),
+        connect_timeout: Duration::from_secs(2),
     }
 }
 

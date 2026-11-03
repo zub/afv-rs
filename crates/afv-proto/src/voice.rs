@@ -6,6 +6,15 @@
 use crate::Result;
 use crate::msgpack::{self, Reader};
 
+/// `H` is `[Callsign]`.
+const HEARTBEAT_FIELDS: u32 = 1;
+/// `AT` and `AR` are `[Callsign, SequenceCounter, Audio, LastPacket, Transceivers]`.
+const AUDIO_FIELDS: u32 = 5;
+/// An `AT` transceiver is `[ID]`.
+const TX_TRANSCEIVER_FIELDS: u32 = 1;
+/// An `AR` transceiver is `[ID, Frequency, DistanceRatio]`.
+const RX_TRANSCEIVER_FIELDS: u32 = 3;
+
 /// A message type that can travel inside a CryptoDTO datagram.
 pub trait Dto: Sized {
     /// The type name sent in front of the body (`"H"`, `"AT"`, ...).
@@ -24,15 +33,15 @@ impl Dto for Heartbeat {
     const NAME: &'static str = "H";
 
     fn encode(&self, out: &mut Vec<u8>) -> Result<()> {
-        msgpack::write_array_len(out, 1)?;
+        msgpack::write_array_len(out, HEARTBEAT_FIELDS as usize)?;
         msgpack::write_str(out, &self.callsign)
     }
 
     fn decode(body: &[u8]) -> Result<Self> {
         let mut r = Reader::new(body);
-        let len = r.array(1)?;
+        let len = r.array(HEARTBEAT_FIELDS)?;
         let callsign = r.str()?.to_owned();
-        r.skip_rest(len, 1)?;
+        r.skip_rest(len, HEARTBEAT_FIELDS)?;
         Ok(Self { callsign })
     }
 }
@@ -74,7 +83,7 @@ impl Dto for AudioTx {
         encode_audio_header(out, &self.callsign, self.sequence, &self.audio, self.last_packet)?;
         msgpack::write_array_len(out, self.transceivers.len())?;
         for &id in &self.transceivers {
-            msgpack::write_array_len(out, 1)?;
+            msgpack::write_array_len(out, TX_TRANSCEIVER_FIELDS as usize)?;
             msgpack::write_uint(out, id.into());
         }
         Ok(())
@@ -82,16 +91,16 @@ impl Dto for AudioTx {
 
     fn decode(body: &[u8]) -> Result<Self> {
         let mut r = Reader::new(body);
-        let len = r.array(5)?;
+        let len = r.array(AUDIO_FIELDS)?;
         let (callsign, sequence, audio, last_packet) = decode_audio_header(&mut r)?;
         let count = r.array(0)?;
         let mut transceivers = Vec::with_capacity(count as usize);
         for _ in 0..count {
-            let fields = r.array(1)?;
+            let fields = r.array(TX_TRANSCEIVER_FIELDS)?;
             transceivers.push(r.uint("transceiver id")?);
-            r.skip_rest(fields, 1)?;
+            r.skip_rest(fields, TX_TRANSCEIVER_FIELDS)?;
         }
-        r.skip_rest(len, 5)?;
+        r.skip_rest(len, AUDIO_FIELDS)?;
         Ok(Self { callsign, sequence, audio, last_packet, transceivers })
     }
 }
@@ -125,7 +134,7 @@ impl Dto for AudioRx {
         encode_audio_header(out, &self.callsign, self.sequence, &self.audio, self.last_packet)?;
         msgpack::write_array_len(out, self.transceivers.len())?;
         for t in &self.transceivers {
-            msgpack::write_array_len(out, 3)?;
+            msgpack::write_array_len(out, RX_TRANSCEIVER_FIELDS as usize)?;
             msgpack::write_uint(out, t.id.into());
             msgpack::write_uint(out, t.frequency.into());
             msgpack::write_f32(out, t.distance_ratio);
@@ -135,26 +144,26 @@ impl Dto for AudioRx {
 
     fn decode(body: &[u8]) -> Result<Self> {
         let mut r = Reader::new(body);
-        let len = r.array(5)?;
+        let len = r.array(AUDIO_FIELDS)?;
         let (callsign, sequence, audio, last_packet) = decode_audio_header(&mut r)?;
         let count = r.array(0)?;
         let mut transceivers = Vec::with_capacity(count as usize);
         for _ in 0..count {
-            let fields = r.array(3)?;
+            let fields = r.array(RX_TRANSCEIVER_FIELDS)?;
             transceivers.push(RxTransceiver {
                 id: r.uint("transceiver id")?,
                 frequency: r.uint("frequency")?,
                 distance_ratio: r.float()? as f32,
             });
-            r.skip_rest(fields, 3)?;
+            r.skip_rest(fields, RX_TRANSCEIVER_FIELDS)?;
         }
-        r.skip_rest(len, 5)?;
+        r.skip_rest(len, AUDIO_FIELDS)?;
         Ok(Self { callsign, sequence, audio, last_packet, transceivers })
     }
 }
 
 fn encode_audio_header(out: &mut Vec<u8>, callsign: &str, sequence: u32, audio: &[u8], last: bool) -> Result<()> {
-    msgpack::write_array_len(out, 5)?;
+    msgpack::write_array_len(out, AUDIO_FIELDS as usize)?;
     msgpack::write_str(out, callsign)?;
     msgpack::write_uint(out, sequence.into());
     msgpack::write_bin(out, audio)?;

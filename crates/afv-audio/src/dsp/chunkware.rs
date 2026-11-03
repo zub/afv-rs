@@ -5,6 +5,8 @@
 //! links its two inputs.
 
 const DC_OFFSET: f64 = 1.0e-25;
+/// What remains of a step after one time constant of the limiter's fast envelope.
+const FAST_RESIDUE: f64 = 0.01;
 
 fn lin_to_db(lin: f64) -> f64 {
     lin.ln() * 8.685_889_638_065_037
@@ -26,9 +28,10 @@ impl Envelope {
         Self { coef: (-1000.0 / (ms * sample_rate)).exp() }
     }
 
-    /// The limiter's faster coefficient: `0.01 ^ (1000 / (ms * rate))`.
+    /// The limiter's faster coefficient: `0.01 ^ (1000 / (ms * rate))`, which covers all but
+    /// 1 % (−40 dB) of a step in `ms`.
     fn fast(ms: f64, sample_rate: f64) -> Self {
-        Self { coef: 0.01f64.powf(1000.0 / (ms * sample_rate)) }
+        Self { coef: FAST_RESIDUE.powf(1000.0 / (ms * sample_rate)) }
     }
 
     fn run(&self, input: f64, state: &mut f64) {

@@ -18,7 +18,13 @@ pub struct RmsAgc {
 impl Default for RmsAgc {
     /// Target −18 dBFS, gain limited to ±12 dB, attack 5 ms, release 150 ms.
     fn default() -> Self {
-        Self::new(-18.0, 12.0, -12.0, 5.0, 150.0)
+        Self::new(
+            Self::DEFAULT_TARGET_DB,
+            Self::DEFAULT_MAX_GAIN_DB,
+            Self::DEFAULT_MIN_GAIN_DB,
+            Self::DEFAULT_ATTACK_MS,
+            Self::DEFAULT_RELEASE_MS,
+        )
     }
 }
 
@@ -31,6 +37,15 @@ fn db_to_lin(db: f64) -> f64 {
 }
 
 impl RmsAgc {
+    /// afv-native's settings.
+    pub const DEFAULT_TARGET_DB: f64 = -18.0;
+    pub const DEFAULT_MAX_GAIN_DB: f64 = 12.0;
+    pub const DEFAULT_MIN_GAIN_DB: f64 = -12.0;
+    pub const DEFAULT_ATTACK_MS: f64 = 5.0;
+    pub const DEFAULT_RELEASE_MS: f64 = 150.0;
+    /// Below this RMS the input counts as silence and gets unity gain rather than the maximum.
+    const SILENCE: f64 = 1e-6;
+
     pub fn new(target_db: f64, max_gain_db: f64, min_gain_db: f64, attack_ms: f64, release_ms: f64) -> Self {
         Self {
             enabled: true,
@@ -79,7 +94,7 @@ impl RmsAgc {
         let coef = if rms > self.envelope { self.attack } else { self.release };
         self.envelope = rms + coef * (self.envelope - rms);
 
-        let desired = if self.envelope > 1e-6 { self.target / self.envelope } else { 1.0 };
+        let desired = if self.envelope > Self::SILENCE { self.target / self.envelope } else { 1.0 };
         let desired = desired.min(self.max_gain).max(self.min_gain);
         // Ramp the gain across the frame to avoid zipper noise.
         let step = (desired - self.gain) / frame.len() as f64;

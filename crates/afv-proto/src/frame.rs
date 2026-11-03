@@ -23,6 +23,13 @@ use crate::{Error, Result};
 pub const KEY_LEN: usize = 32;
 pub const NONCE_LEN: usize = 12;
 pub const TAG_LEN: usize = 16;
+/// The header, the DTO name and the DTO body are each preceded by their length as a
+/// little-endian u16.
+const LEN_PREFIX: usize = 2;
+/// The header is `[ChannelTag, Sequence, Mode]`.
+const HEADER_FIELDS: u32 = 3;
+/// The nonce is zeros followed by the sequence number as a little-endian u64.
+const NONCE_SEQUENCE_AT: usize = NONCE_LEN - size_of::<u64>();
 
 /// Value of the header `Mode` field.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -106,7 +113,7 @@ impl fmt::Debug for Codec {
 
 fn nonce(sequence: u64) -> Nonce {
     let mut n = [0u8; NONCE_LEN];
-    n[4..].copy_from_slice(&sequence.to_le_bytes());
+    n[NONCE_SEQUENCE_AT..].copy_from_slice(&sequence.to_le_bytes());
     n.into()
 }
 
@@ -137,13 +144,13 @@ impl Codec {
     /// Encrypts an already-encoded DTO body.
     pub fn seal_raw(&self, sequence: u64, name: &str, body: &[u8]) -> Result<Vec<u8>> {
         let mut header = Vec::with_capacity(self.tag.len() + 16);
-        msgpack::write_array_len(&mut header, 3)?;
+        msgpack::write_array_len(&mut header, HEADER_FIELDS as usize)?;
         msgpack::write_str(&mut header, &self.tag)?;
         msgpack::write_uint(&mut header, sequence);
         msgpack::write_uint(&mut header, Mode::ChaCha20Poly1305 as u64);
 
-        let plain_len = 2 + name.len() + 2 + body.len();
-        let mut out = Vec::with_capacity(2 + header.len() + plain_len + TAG_LEN);
+        let plain_len = LEN_PREFIX + name.len() + LEN_PREFIX + body.len();
+        let mut out = Vec::with_capacity(LEN_PREFIX + header.len() + plain_len + TAG_LEN);
         out.extend_from_slice(&u16_len(header.len(), "header")?);
         out.extend_from_slice(&header);
         let aad_len = out.len();
@@ -162,11 +169,12 @@ impl Codec {
 
     /// Authenticates and decrypts a datagram. Does not check for replays; see [`Channel`].
     pub fn open(&self, datagram: &[u8]) -> Result<Opened> {
-        let header_len = u16::from_le_bytes(datagram.get(..2).ok_or(Error::Truncated)?.try_into().unwrap()) as usize;
-        let aad = datagram.get(..2 + header_len).ok_or(Error::Truncated)?;
+        let prefix = datagram.get(..LEN_PREFIX).ok_or(Error::Truncated)?;
+        let header_len = u16::from_le_bytes(prefix.try_into().unwrap()) as usize;
+        let aad = datagram.get(..LEN_PREFIX + header_len).ok_or(Error::Truncated)?;
 
-        let mut r = Reader::new(&aad[2..]);
-        r.array(3)?;
+        let mut r = Reader::new(&aad[LEN_PREFIX..]);
+        r.array(HEADER_FIELDS)?;
         let tag = r.str()?;
         let sequence: u64 = r.uint("sequence")?;
         let mode: i64 = r.uint("mode")?;
@@ -195,14 +203,14 @@ impl Codec {
 
 fn split_payload(plain: &[u8]) -> Result<(&str, &[u8])> {
     let read_len = |at: usize| -> Result<usize> {
-        let b = plain.get(at..at + 2).ok_or(Error::Truncated)?;
+        let b = plain.get(at..at + LEN_PREFIX).ok_or(Error::Truncated)?;
         Ok(u16::from_le_bytes([b[0], b[1]]) as usize)
     };
     let name_len = read_len(0)?;
-    let name = plain.get(2..2 + name_len).ok_or(Error::Truncated)?;
+    let name = plain.get(LEN_PREFIX..LEN_PREFIX + name_len).ok_or(Error::Truncated)?;
     let name = std::str::from_utf8(name).map_err(|_| Error::InvalidUtf8)?;
-    let body_len = read_len(2 + name_len)?;
-    let body = &plain[4 + name_len..];
+    let body_len = read_len(LEN_PREFIX + name_len)?;
+    let body = &plain[2 * LEN_PREFIX + name_len..];
     if body.len() != body_len {
         return Err(Error::LengthMismatch);
     }

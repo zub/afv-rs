@@ -42,6 +42,8 @@ pub struct Timing {
     pub reconnect_backoff_max: Duration,
     /// Per-request timeout for REST calls.
     pub http_timeout: Duration,
+    /// Timeout for establishing the HTTPS connection of a REST call.
+    pub connect_timeout: Duration,
 }
 
 impl Timing {
@@ -57,6 +59,7 @@ impl Timing {
             reconnect_backoff: Duration::from_secs(1),
             reconnect_backoff_max: Duration::from_secs(30),
             http_timeout: Duration::from_secs(15),
+            connect_timeout: Duration::from_secs(5),
         }
     }
 

@@ -113,7 +113,13 @@ pub struct LevelMeter {
 }
 
 impl LevelMeter {
+    /// Frames averaged: 300 ms.
     const WINDOW: usize = 15;
+    /// The bottom of the scale, in dBFS peak…
+    const FLOOR_DB: f64 = -40.0;
+    /// …and readings below this fraction of it show as 0, so that background noise does not move
+    /// the meter.
+    const CUTOFF: f64 = 0.30;
 
     fn new() -> Self {
         Self { window: [0.0; Self::WINDOW], next: 0, average: 0.0 }
@@ -121,9 +127,9 @@ impl LevelMeter {
 
     fn add(&mut self, frame: &Frame) {
         let peak = frame.iter().fold(0f32, |m, s| m.max(s.abs())) as f64;
-        let db = (20.0 * peak.log10()).clamp(-40.0, 0.0);
-        let mut ratio = (db + 40.0) / 40.0;
-        if ratio < 0.30 {
+        let db = (20.0 * peak.log10()).clamp(Self::FLOOR_DB, 0.0);
+        let mut ratio = (db - Self::FLOOR_DB) / -Self::FLOOR_DB;
+        if ratio < Self::CUTOFF {
             ratio = 0.0;
         }
         self.average += (ratio - self.window[self.next]) / Self::WINDOW as f64;

@@ -18,6 +18,10 @@
 
 use std::ops::RangeInclusive;
 
+use rand::rngs::SmallRng;
+use rand::{RngExt, SeedableRng};
+use rand_distr::{Exp, Pareto, StandardNormal};
+
 use super::Biquad;
 use crate::{FRAME_SAMPLES, Frame, SAMPLE_RATE};
 
@@ -223,48 +227,6 @@ impl Hilbert {
     }
 }
 
-/// xorshift64*: small, fast and deterministic.
-#[derive(Debug, Clone)]
-struct Rng(u64);
-
-impl Rng {
-    /// Seeds through SplitMix64, so that similar seeds give unrelated sequences.
-    fn new(seed: u64) -> Self {
-        let mut z = seed.wrapping_add(0x9e37_79b9_7f4a_7c15);
-        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
-        z ^= z >> 31;
-        Self(z.max(1))
-    }
-
-    fn next(&mut self) -> u64 {
-        self.0 ^= self.0 >> 12;
-        self.0 ^= self.0 << 25;
-        self.0 ^= self.0 >> 27;
-        self.0.wrapping_mul(0x2545_f491_4f6c_dd1d)
-    }
-
-    /// Uniform in [−1, 1).
-    fn uniform(&mut self) -> f64 {
-        (self.next() >> 11) as f64 / (1u64 << 52) as f64 - 1.0
-    }
-
-    /// Uniform in [0, 1).
-    fn unit(&mut self) -> f64 {
-        (self.uniform() + 1.0) / 2.0
-    }
-
-    /// Approximately standard normal (sum of three uniforms, variance 1).
-    fn gaussian(&mut self) -> f64 {
-        self.uniform() + self.uniform() + self.uniform()
-    }
-
-    fn range(&mut self, range: RangeInclusive<u32>) -> u32 {
-        let (lo, hi) = range.into_inner();
-        lo + (self.next() % (hi - lo + 1) as u64) as u32
-    }
-}
-
 type Complex = (f64, f64);
 
 fn mul(a: Complex, b: Complex) -> Complex {
@@ -289,14 +251,14 @@ struct Path {
 }
 
 impl Path {
-    fn new(rng: &mut Rng) -> Self {
-        let mut doppler: [f64; SINUSOIDS] = std::array::from_fn(|_| rng.gaussian());
+    fn new(rng: &mut SmallRng) -> Self {
+        let mut doppler: [f64; SINUSOIDS] = std::array::from_fn(|_| rng.sample::<f64, _>(StandardNormal));
         // Scale to exactly σ RMS: the fading speed depends on it, and 16 random draws would
         // otherwise leave it up to ±30 % off.
         let rms = (doppler.iter().map(|f| f * f).sum::<f64>() / SINUSOIDS as f64).sqrt();
         doppler.iter_mut().for_each(|f| *f /= rms);
-        let phases = std::array::from_fn(|_| rng.unit());
-        let angle = std::f64::consts::TAU * rng.unit();
+        let phases = std::array::from_fn(|_| rng.random::<f64>());
+        let angle = std::f64::consts::TAU * rng.random::<f64>();
         Self { doppler, phases, steady: (angle.cos(), angle.sin()) }
     }
 
@@ -324,7 +286,7 @@ impl Path {
 #[derive(Debug, Clone)]
 pub struct HfChannel {
     hilbert: Hilbert,
-    rng: Rng,
+    rng: SmallRng,
     /// The station's tuning error as a fraction of [`HfConditions::offset_hz`].
     offset: f64,
     /// Current drift as a fraction of [`HfConditions::drift_hz`], heading for `drift_target`.
@@ -348,13 +310,13 @@ pub struct HfChannel {
 
 impl HfChannel {
     pub fn new(seed: u64) -> Self {
-        let mut rng = Rng::new(seed);
-        let offset = rng.uniform();
-        let drift = rng.uniform();
-        let drift_target = rng.uniform();
-        let drift_hold = rng.range(DRIFT_HOLD_FRAMES);
+        let mut rng = SmallRng::seed_from_u64(seed);
+        let offset = rng.random_range(-1.0..1.0);
+        let drift = rng.random_range(-1.0..1.0);
+        let drift_target = rng.random_range(-1.0..1.0);
+        let drift_hold = rng.random_range(DRIFT_HOLD_FRAMES);
         let paths = [Path::new(&mut rng), Path::new(&mut rng)];
-        let slow = rng.gaussian();
+        let slow = rng.sample::<f64, _>(StandardNormal);
         Self {
             hilbert: Hilbert::default(),
             rng,
@@ -436,14 +398,14 @@ impl HfChannel {
     fn advance_slow(&mut self) {
         self.drift_hold = self.drift_hold.saturating_sub(1);
         if self.drift_hold == 0 {
-            self.drift_target = self.rng.uniform();
-            self.drift_hold = self.rng.range(DRIFT_HOLD_FRAMES);
+            self.drift_target = self.rng.random_range(-1.0..1.0);
+            self.drift_hold = self.rng.random_range(DRIFT_HOLD_FRAMES);
         }
         let k = 1.0 - (-FRAME_SECONDS / DRIFT_TIME_CONSTANT).exp();
         self.drift += (self.drift_target - self.drift) * k;
 
         let a = (-FRAME_SECONDS / SLOW_FADING_TIME_CONSTANT).exp();
-        self.slow = a * self.slow + (1.0 - a * a).sqrt() * self.rng.gaussian();
+        self.slow = a * self.slow + (1.0 - a * a).sqrt() * self.rng.sample::<f64, _>(StandardNormal);
     }
 
     /// The slow fading amplitude: log-normal with the configured spread, rising at most
@@ -543,7 +505,7 @@ struct Burst {
 /// a given seed.
 #[derive(Debug, Clone)]
 pub struct Crackle {
-    rng: Rng,
+    rng: SmallRng,
     /// Samples until the next impulse; `None` until a rate is known.
     next: Option<f64>,
     /// The rate `next` was drawn for.
@@ -558,7 +520,7 @@ pub struct Crackle {
 impl Crackle {
     pub fn new(seed: u64) -> Self {
         Self {
-            rng: Rng::new(seed ^ CRACKLE_STREAM),
+            rng: SmallRng::seed_from_u64(seed ^ CRACKLE_STREAM),
             next: None,
             rate: 0.0,
             run: 0,
@@ -576,21 +538,21 @@ impl Crackle {
     /// Samples until the next impulse at the current rate (exponentially distributed).
     fn draw(&mut self) -> f64 {
         let rate = if self.run > 0 { self.rate * CRACKLE_RUN_RATE } else { self.rate };
-        -(1.0 - self.rng.unit()).ln() / rate * SAMPLE_RATE as f64
+        self.rng.sample(Exp::new(rate).expect("the rate is positive")) * SAMPLE_RATE as f64
     }
 
     fn crash(&mut self, level: f32) {
         self.crashes += 1;
         // Heavy-tailed size: mostly about a tenth of the loudest, rarely the loudest itself.
-        let u = self.rng.unit().max(f64::MIN_POSITIVE);
-        let size = (CRACKLE_SMALLEST * u.powf(-1.0 / CRACKLE_SIZE_SHAPE)).min(1.0) as f32;
+        let sizes = Pareto::new(CRACKLE_SMALLEST, CRACKLE_SIZE_SHAPE).expect("valid parameters");
+        let size = self.rng.sample(sizes).min(1.0) as f32;
         // Larger crashes last a little longer.
         let tau_samples = (CRACKLE_SHORTEST_S + CRACKLE_LENGTH_RANGE_S * size as f64) * SAMPLE_RATE as f64;
         let burst = Burst { amplitude: level * CRACKLE_MAX_AMPLITUDE * size, decay: (-1.0 / tau_samples).exp() as f32 };
         let slot = self.bursts.iter_mut().min_by(|a, b| a.amplitude.total_cmp(&b.amplitude)).expect("MAX_BURSTS > 0");
         *slot = burst;
         if size > CRACKLE_RUN_THRESHOLD {
-            self.run = self.run.max(self.rng.range(CRACKLE_RUN_SAMPLES));
+            self.run = self.run.max(self.rng.random_range(CRACKLE_RUN_SAMPLES));
         }
     }
 
@@ -621,15 +583,15 @@ impl Crackle {
                 envelope += b.amplitude;
                 b.amplitude *= b.decay;
             }
-            *o += self.rng.gaussian() as f32 * envelope;
+            *o += self.rng.sample::<f32, _>(StandardNormal) * envelope;
         }
     }
 }
 
-/// The unfaded voice level ahead of the sideband filter on an HF radio: afv-native's HF voice
-/// gain of 0.2 applied to a stream at the −18 dBFS AGC target. Background levels are relative to it.
+/// The unfaded voice level ahead of the sideband filter on an HF radio: the HF voice gain applied
+/// to a stream at the AGC target. Background levels are relative to it.
 fn voice_rms() -> f32 {
-    0.2 * 0.125_9
+    crate::radio::HF_VOICE_GAIN * 10f32.powf(super::RmsAgc::DEFAULT_TARGET_DB as f32 / 20.0)
 }
 
 /// Share of white noise's power inside the sideband: its width over the whole band.
@@ -646,12 +608,12 @@ const HISS_CALIBRATION: f32 = 0.21;
 /// voice as heard on the default radio (other hardware presets shift the balance a few dB).
 #[derive(Debug, Clone)]
 pub struct Hiss {
-    rng: Rng,
+    rng: SmallRng,
 }
 
 impl Hiss {
     pub fn new(seed: u64) -> Self {
-        Self { rng: Rng::new(seed ^ HISS_STREAM) }
+        Self { rng: SmallRng::seed_from_u64(seed ^ HISS_STREAM) }
     }
 
     /// Adds one frame of hiss under `conditions` to `out`.
@@ -662,7 +624,7 @@ impl Hiss {
         }
         let sigma = HISS_CALIBRATION * level * voice_rms() / SSB_SHARE.sqrt();
         for o in out.iter_mut() {
-            *o += sigma * self.rng.gaussian() as f32;
+            *o += sigma * self.rng.sample::<f64, _>(StandardNormal) as f32;
         }
     }
 }
@@ -711,7 +673,7 @@ struct Chirp {
 /// Deterministic for a given seed.
 #[derive(Debug, Clone)]
 pub struct Sounders {
-    rng: Rng,
+    rng: SmallRng,
     next: Option<f64>,
     rate: f64,
     chirps: [Chirp; MAX_CHIRPS],
@@ -723,7 +685,7 @@ pub struct Sounders {
 impl Sounders {
     pub fn new(seed: u64) -> Self {
         Self {
-            rng: Rng::new(seed ^ SOUNDER_STREAM),
+            rng: SmallRng::seed_from_u64(seed ^ SOUNDER_STREAM),
             next: None,
             rate: 0.0,
             chirps: [Chirp::default(); MAX_CHIRPS],
@@ -737,7 +699,7 @@ impl Sounders {
     }
 
     fn draw(&mut self) -> f64 {
-        -(1.0 - self.rng.unit()).ln() / self.rate * SAMPLE_RATE as f64
+        self.rng.sample(Exp::new(self.rate).expect("the rate is positive")) * SAMPLE_RATE as f64
     }
 
     fn start(&mut self, chirp: Chirp) {
@@ -748,11 +710,11 @@ impl Sounders {
 
     fn pass(&mut self, level: f32) {
         self.passes += 1;
-        let rate = SOUNDER_SWEEP_RATES[self.rng.range(0..=SOUNDER_SWEEP_RATES.len() as u32 - 1) as usize];
-        let up = self.rng.unit() < SOUNDER_UPWARD;
+        let rate = SOUNDER_SWEEP_RATES[self.rng.random_range(0..SOUNDER_SWEEP_RATES.len())];
+        let up = self.rng.random_bool(SOUNDER_UPWARD);
         let sweep = if up { rate } else { -rate } / SAMPLE_RATE as f64;
         let amplitude =
-            level * sounder_max_amplitude() * 10f32.powf(-SOUNDER_STRENGTH_SPREAD_DB / 20.0 * self.rng.unit() as f32);
+            level * sounder_max_amplitude() * 10f32.powf(-SOUNDER_STRENGTH_SPREAD_DB / 20.0 * self.rng.random::<f32>());
         let chirp = Chirp {
             wait: 0,
             frequency: if up { 0.0 } else { SOUNDER_SPAN_HZ },
@@ -762,11 +724,9 @@ impl Sounders {
             active: true,
         };
         self.start(chirp);
-        if self.rng.unit() < SOUNDER_ECHO_CHANCE {
-            let (lo, hi) = SOUNDER_ECHO_DELAY_S.into_inner();
-            let delay = (lo + (hi - lo) * self.rng.unit()) * SAMPLE_RATE as f64;
-            let (lo, hi) = SOUNDER_ECHO_STRENGTH.into_inner();
-            let strength = lo + (hi - lo) * self.rng.unit() as f32;
+        if self.rng.random_bool(SOUNDER_ECHO_CHANCE) {
+            let delay = self.rng.random_range(SOUNDER_ECHO_DELAY_S) * SAMPLE_RATE as f64;
+            let strength = self.rng.random_range(SOUNDER_ECHO_STRENGTH);
             self.start(Chirp { wait: delay as i64, amplitude: amplitude * strength, ..chirp });
             self.echoes += 1;
         }

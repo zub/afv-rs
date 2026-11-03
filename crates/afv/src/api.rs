@@ -25,7 +25,7 @@ impl Api {
     pub(crate) fn new(config: Config) -> Result<Self> {
         let http = reqwest::Client::builder()
             .user_agent(concat!("afv-rs/", env!("CARGO_PKG_VERSION")))
-            .connect_timeout(Duration::from_secs(5))
+            .connect_timeout(config.timing.connect_timeout)
             .timeout(config.timing.http_timeout)
             .build()?;
         Ok(Self { http, config, token: RwLock::new(None) })
