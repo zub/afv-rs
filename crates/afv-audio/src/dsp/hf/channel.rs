@@ -11,6 +11,9 @@
 //!   1944–45: the level-crossing rate the fading-speed test checks against.
 //! - O. Niemitalo, ["Polyphase IIR Hilbert transformers"](https://yehar.com/blog/?p=368): the
 //!   allpass pair that makes the analytic signal for the frequency shift.
+//! - R. A. Valenzuela and A. G. Constantinides, "Digital signal processing schemes for efficient
+//!   interpolation and decimation", *IEE Proceedings G* 130(6), 1983: the polyphase IIR half-band
+//!   design that pair is an instance of.
 //! - Naval Postgraduate School, 1970 report on tuning SSB by ear
 //!   ([calhoun.nps.edu](https://calhoun.nps.edu/entities/publication/f341cc35-61c1-484b-a130-bbc41fa9e149)):
 //!   errors of 20–30 Hz are already noticeable.
@@ -67,8 +70,11 @@ struct Hilbert {
     delayed: f64,
 }
 
-/// The two allpass chains of Olli Niemitalo's design (each coefficient is squared in the filter):
-/// 90° apart to within a degree from about 20 Hz to 23.9 kHz at 48 kHz.
+/// The two allpass chains, as published by Niemitalo in "Polyphase IIR Hilbert transformers"
+/// (each coefficient is squared in the filter). They are a polyphase IIR half-band design
+/// (Valenzuela and Constantinides 1983) with a transition band of about 44 Hz at each end of the
+/// spectrum at 48 kHz: the outputs are 90° apart to within 0.75° from 50 Hz to 10 kHz, and
+/// within a degree from about 20 Hz to 23.9 kHz.
 const HILBERT_A: [f64; 4] = [0.6923878, 0.9360654322959, 0.9882295226860, 0.9987488452737];
 const HILBERT_B: [f64; 4] = [0.4021921162426, 0.8561710882420, 0.9722909545651, 0.9952884791278];
 
@@ -341,13 +347,13 @@ mod tests {
 
     #[test]
     fn hilbert_outputs_are_equal_and_in_quadrature() {
-        for freq in [50.0, 300.0, 1000.0, 3000.0, 10_000.0] {
+        for freq in [50.0, 100.0, 300.0, 1000.0, 3000.0, 6000.0, 10_000.0] {
             let mut h = Hilbert::default();
             let (i, q): (Vec<f32>, Vec<f32>) = sine(freq, 0.5, 48_000).into_iter().map(|x| h.process(x)).unzip();
             let ((ai, pi), (aq, pq)) = (bin(&i[24_000..], freq), bin(&q[24_000..], freq));
             assert!((ai - 0.5).abs() < 0.005 && (aq - 0.5).abs() < 0.005, "{freq} Hz: amplitudes {ai} {aq}");
             let lead = (pq - pi).rem_euclid(360.0);
-            assert!((lead - 90.0).abs() < 1.0, "{freq} Hz: q leads i by {lead}°");
+            assert!((lead - 90.0).abs() < 0.8, "{freq} Hz: q leads i by {lead}°");
         }
     }
 
