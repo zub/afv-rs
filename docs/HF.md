@@ -21,9 +21,9 @@ same number of hertz to each harmonic, so they no longer line up: shifted up the
 squeaky and thin, shifted down it growls. A few tens of hertz already sound odd; hundreds of hertz
 make speech hard to follow.
 
-**Model.** Each station has its own fixed tuning error, drawn once from its callsign, anywhere
-within ±`offset_hz`. On top, the error drifts slowly by up to ±`drift_hz`, heading for a new random
-value every 2–6 seconds. The shift itself is done exactly: a Hilbert filter pair turns the audio
+**Model.** Each station has its own fixed tuning error, drawn at random when it is first heard,
+anywhere within ±`offset_hz`. On top, the error drifts slowly by up to ±`drift_hz`, heading for a
+new random value every 2–6 seconds. The shift itself is done exactly: a Hilbert filter pair turns the audio
 into an "analytic" signal, which is then rotated by Δf.
 
 ## 2. Multipath fading: the watery, warbling sound

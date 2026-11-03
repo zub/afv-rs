@@ -20,11 +20,12 @@
 
 use std::ops::RangeInclusive;
 
+use rand::RngExt;
 use rand::rngs::SmallRng;
-use rand::{RngExt, SeedableRng};
 use rand_distr::StandardNormal;
 
 use super::HfConditions;
+use crate::dsp::with_rng;
 use crate::{FRAME_SAMPLES, Frame, SAMPLE_RATE};
 
 const FRAME_SECONDS: f64 = FRAME_SAMPLES as f64 / SAMPLE_RATE as f64;
@@ -36,9 +37,6 @@ const DRIFT_TIME_CONSTANT: f64 = 1.5;
 const SLOW_FADING_TIME_CONSTANT: f64 = 8.0;
 /// …and rises at most this far above the nominal level, in dB (fades are not limited).
 const SLOW_FADING_MAX_DB: f64 = 6.0;
-/// Mixed into the callsign's hash, so that a station's channel draws different random numbers
-/// from a radio's background.
-const CHANNEL_STREAM: u64 = 0x6866_5f63_6861_6e6e;
 /// Sinusoids summed per path to synthesise its Gaussian fading process.
 const SINUSOIDS: usize = 16;
 /// Delay line for the second path: up to 10.6 ms.
@@ -151,11 +149,11 @@ impl Path {
 }
 
 /// HF propagation for one station: everything the ionosphere and a mistuned receiver do to its
-/// voice. Deterministic for a given seed.
+/// voice. Each new channel draws its own tuning error and fading paths; keep it for as long as the
+/// station is heard.
 #[derive(Debug, Clone)]
 pub struct HfChannel {
     hilbert: Hilbert,
-    rng: SmallRng,
     /// The station's tuning error as a fraction of [`HfConditions::offset_hz`].
     offset: f64,
     /// Current drift as a fraction of [`HfConditions::drift_hz`], heading for `drift_target`.
@@ -177,18 +175,26 @@ pub struct HfChannel {
     delay: usize,
 }
 
+impl Default for HfChannel {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl HfChannel {
-    pub fn new(seed: u64) -> Self {
-        let mut rng = SmallRng::seed_from_u64(seed);
-        let offset = rng.random_range(-1.0..1.0);
-        let drift = rng.random_range(-1.0..1.0);
-        let drift_target = rng.random_range(-1.0..1.0);
-        let drift_hold = rng.random_range(DRIFT_HOLD_FRAMES);
-        let paths = [Path::new(&mut rng), Path::new(&mut rng)];
-        let slow = rng.sample::<f64, _>(StandardNormal);
+    pub fn new() -> Self {
+        let (offset, drift, drift_target, drift_hold, paths, slow) = with_rng(|rng| {
+            (
+                rng.random_range(-1.0..1.0),
+                rng.random_range(-1.0..1.0),
+                rng.random_range(-1.0..1.0),
+                rng.random_range(DRIFT_HOLD_FRAMES),
+                [Path::new(rng), Path::new(rng)],
+                rng.sample::<f64, _>(StandardNormal),
+            )
+        });
         Self {
             hilbert: Hilbert::default(),
-            rng,
             offset,
             drift,
             drift_target,
@@ -201,11 +207,6 @@ impl HfChannel {
             write: 0,
             delay: 0,
         }
-    }
-
-    /// The channel for a station, the same on every run.
-    pub fn for_callsign(callsign: &str) -> Self {
-        Self::new(crate::dsp::callsign_hash(callsign) ^ CHANNEL_STREAM)
     }
 
     /// The current frequency shift under `conditions`, in Hz.
@@ -267,14 +268,15 @@ impl HfChannel {
     fn advance_slow(&mut self) {
         self.drift_hold = self.drift_hold.saturating_sub(1);
         if self.drift_hold == 0 {
-            self.drift_target = self.rng.random_range(-1.0..1.0);
-            self.drift_hold = self.rng.random_range(DRIFT_HOLD_FRAMES);
+            (self.drift_target, self.drift_hold) =
+                with_rng(|rng| (rng.random_range(-1.0..1.0), rng.random_range(DRIFT_HOLD_FRAMES)));
         }
         let k = 1.0 - (-FRAME_SECONDS / DRIFT_TIME_CONSTANT).exp();
         self.drift += (self.drift_target - self.drift) * k;
 
         let a = (-FRAME_SECONDS / SLOW_FADING_TIME_CONSTANT).exp();
-        self.slow = a * self.slow + (1.0 - a * a).sqrt() * self.rng.sample::<f64, _>(StandardNormal);
+        let innovation = with_rng(|rng| rng.sample::<f64, _>(StandardNormal));
+        self.slow = a * self.slow + (1.0 - a * a).sqrt() * innovation;
     }
 
     /// The slow fading amplitude: log-normal with the configured spread, rising at most
@@ -301,6 +303,12 @@ impl HfChannel {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A new channel, its random numbers seeded so that the test repeats.
+    fn channel(seed: u64) -> HfChannel {
+        crate::dsp::seed_rng(seed);
+        HfChannel::new()
+    }
     use crate::test_util::{sine, sine_frame, tone};
 
     /// Complex DFT bin of `x` at `freq`, as (amplitude, phase in degrees).
@@ -335,7 +343,7 @@ mod tests {
 
     /// Path power per frame over `frames` frames of silence.
     fn powers(c: &HfConditions, frames: usize, seed: u64) -> Vec<f64> {
-        let mut ch = HfChannel::new(seed);
+        let mut ch = channel(seed);
         let (silence, mut out) = ([0.0; FRAME_SAMPLES], [0.0; FRAME_SAMPLES]);
         (0..frames)
             .map(|_| {
@@ -359,7 +367,7 @@ mod tests {
 
     #[test]
     fn off_keeps_every_tone_and_level() {
-        let mut ch = HfChannel::new(1);
+        let mut ch = channel(1);
         let out = render(&mut ch, &HfConditions::OFF, 1000.0, 50);
         assert!((tone(&out[24_000..], 1000.0) - 0.5).abs() < 0.005, "{}", tone(&out[24_000..], 1000.0));
         assert!((ch.power() - 1.0).abs() < 1e-12);
@@ -368,7 +376,7 @@ mod tests {
     #[test]
     fn the_offset_shifts_every_tone_by_the_same_hz() {
         for (offset, expected) in [(1.0, 1050.0), (-1.0, 950.0)] {
-            let mut ch = HfChannel::new(1);
+            let mut ch = channel(1);
             ch.offset = offset;
             let out = render(&mut ch, &shift_only(50.0, 0.0), 1000.0, 50);
             let settled = &out[24_000..];
@@ -382,7 +390,7 @@ mod tests {
     #[test]
     fn the_shift_is_an_offset_not_a_scaling() {
         // Harmonics 500 and 1000 Hz move by the same 30 Hz, to 530 and 1030 Hz.
-        let mut ch = HfChannel::new(1);
+        let mut ch = channel(1);
         ch.offset = 1.0;
         let c = shift_only(30.0, 0.0);
         let mut out = [0.0; FRAME_SAMPLES];
@@ -403,7 +411,7 @@ mod tests {
     #[test]
     fn drift_wanders_smoothly_within_its_range() {
         let c = shift_only(0.0, 10.0);
-        let mut ch = HfChannel::new(7);
+        let mut ch = channel(7);
         let mut out = [0.0; FRAME_SAMPLES];
         let silence = [0.0; FRAME_SAMPLES];
         let shifts: Vec<f64> = (0..3000)
@@ -422,35 +430,24 @@ mod tests {
     #[test]
     fn the_shift_stays_within_offset_plus_drift() {
         let c = shift_only(40.0, 5.0);
-        for seed in 0..200 {
-            assert!(HfChannel::new(seed).shift_hz(&c).abs() <= 45.0);
+        for _ in 0..200 {
+            assert!(HfChannel::new().shift_hz(&c).abs() <= 45.0);
         }
     }
 
     #[test]
-    fn neighbouring_callsigns_get_unrelated_channels() {
-        let offsets: Vec<f64> = ["SAS120", "SAS121", "SAS122", "SAS123"]
-            .iter()
-            .map(|c| HfChannel::for_callsign(c).shift_hz(&shift_only(100.0, 0.0)))
-            .collect();
-        assert!(offsets.windows(2).all(|w| (w[0] - w[1]).abs() > 1.0), "{offsets:?}");
-    }
-
-    #[test]
-    fn stations_are_deterministic_and_distinct() {
+    fn every_station_gets_its_own_channel() {
+        let offsets: Vec<f64> = (0..4).map(|_| HfChannel::new().shift_hz(&shift_only(100.0, 0.0))).collect();
+        assert!(offsets.windows(2).all(|w| w[0] != w[1]), "{offsets:?}");
         let c = HfConditions::FAIR;
-        let a = render(&mut HfChannel::for_callsign("SAS123"), &c, 1000.0, 20);
-        let b = render(&mut HfChannel::for_callsign("SAS123"), &c, 1000.0, 20);
-        let other = render(&mut HfChannel::for_callsign("NAX45F"), &c, 1000.0, 20);
-        assert_eq!(a, b);
-        assert_ne!(a, other);
+        assert_ne!(render(&mut HfChannel::new(), &c, 1000.0, 20), render(&mut HfChannel::new(), &c, 1000.0, 20));
     }
 
     #[test]
     fn no_fading_keeps_a_constant_level() {
         // Neither depth without a rate nor a rate without depth fades a single path.
         for c in [fading(0.0, 0.0, 1.0), fading(0.0, 1.0, 0.0)] {
-            let mut ch = HfChannel::new(3);
+            let mut ch = channel(3);
             let out = render(&mut ch, &c, 1000.0, 100);
             let peaks: Vec<f32> =
                 out.chunks(FRAME_SAMPLES).skip(5).map(|f| f.iter().fold(0f32, |m, s| m.max(s.abs()))).collect();
@@ -511,7 +508,7 @@ mod tests {
     fn two_paths_make_notches_one_over_the_delay_apart() {
         // Steady paths 1 ms apart: the response repeats every 1 kHz and has deep notches.
         let response = |freq: f64| {
-            let mut ch = HfChannel::new(14);
+            let mut ch = channel(14);
             tone(&render(&mut ch, &fading(1.0, 0.0, 0.0), freq, 25)[12_000..], freq)
         };
         let sweep: Vec<f32> = (0..50).map(|k| response(300.0 + 20.0 * k as f64)).collect();
@@ -524,7 +521,7 @@ mod tests {
 
     #[test]
     fn bad_settings_do_not_break_the_channel() {
-        let mut ch = HfChannel::new(2);
+        let mut ch = channel(2);
         let bad = HfConditions {
             offset_hz: f32::NAN,
             drift_hz: f32::INFINITY,
@@ -544,7 +541,7 @@ mod tests {
         // Steps where the conditions change are no larger than the signal's own steps elsewhere.
         let presets =
             [HfConditions::POOR, HfConditions::OFF, HfConditions::FLUTTER, HfConditions::GOOD, HfConditions::FAIR];
-        let mut ch = HfChannel::new(9);
+        let mut ch = channel(9);
         let mut out = Vec::new();
         let mut frame = [0.0; FRAME_SAMPLES];
         for n in 0..presets.len() * 20 {
@@ -562,7 +559,7 @@ mod tests {
     #[test]
     fn fast_fading_is_smooth_across_frames() {
         // Under flutter the path gains change a lot per frame; frame boundaries must not step.
-        let mut ch = HfChannel::new(16);
+        let mut ch = channel(16);
         let out =
             render(&mut ch, &HfConditions { offset_hz: 0.0, drift_hz: 0.0, ..HfConditions::FLUTTER }, 1000.0, 500);
         let step = |i: usize| (out[i] - out[i - 1]).abs();
@@ -575,7 +572,7 @@ mod tests {
     fn slow_fading_is_log_normal_and_slow() {
         // An hour of the slow fading process alone.
         let c = HfConditions { slow_fading_db: 6.0, ..HfConditions::OFF };
-        let mut ch = HfChannel::new(17);
+        let mut ch = channel(17);
         let (mut db, mut state) = (Vec::new(), Vec::new());
         for _ in 0..50 * 3600 {
             ch.advance_slow();
@@ -601,7 +598,7 @@ mod tests {
     #[test]
     fn slow_fading_reaches_the_audio() {
         let c = HfConditions { slow_fading_db: 10.0, ..HfConditions::OFF };
-        let mut ch = HfChannel::new(18);
+        let mut ch = channel(18);
         let mut out = [0.0; FRAME_SAMPLES];
         let mut previous = 0.0;
         for n in 0..500 {
@@ -616,7 +613,7 @@ mod tests {
             }
         }
         // Without it the level does not move.
-        let mut ch = HfChannel::new(18);
+        let mut ch = channel(18);
         ch.process(&HfConditions::OFF, &sine_frame(0, 1000.0, 0.5), &mut out);
         assert_eq!(ch.slow_db(&HfConditions::OFF), 0.0);
     }

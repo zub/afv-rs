@@ -1,5 +1,10 @@
 //! Signal-processing building blocks.
 
+use std::cell::RefCell;
+
+use rand::SeedableRng;
+use rand::rngs::SmallRng;
+
 mod agc;
 mod am;
 mod biquad;
@@ -23,8 +28,20 @@ pub(crate) fn voice_rms() -> f32 {
     10f32.powf(RmsAgc::DEFAULT_TARGET_DB as f32 / 20.0)
 }
 
-/// A stable hash of a callsign, for per-station randomness that is the same on every run and
-/// every machine. FNV-1a: unlike `DefaultHasher`, it does not change between Rust versions.
-pub(crate) fn callsign_hash(callsign: &str) -> u64 {
-    callsign.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, b| (h ^ b as u64).wrapping_mul(0x100_0000_01b3))
+thread_local! {
+    /// The thread's random numbers, seeded once from the operating system. Not `rand::rng()`,
+    /// which reseeds from the OS every 64 KiB of output: several system calls a second on an
+    /// audio thread.
+    static RNG: RefCell<SmallRng> = RefCell::new(rand::make_rng());
+}
+
+/// Runs `f` with this thread's random number generator. Not reentrant: `f` must not call it again.
+pub(crate) fn with_rng<T>(f: impl FnOnce(&mut SmallRng) -> T) -> T {
+    RNG.with_borrow_mut(f)
+}
+
+/// Seeds this thread's random numbers, so that a test can repeat a run.
+#[doc(hidden)]
+pub fn seed_rng(seed: u64) {
+    RNG.set(SmallRng::seed_from_u64(seed));
 }

@@ -352,13 +352,9 @@ mod tests {
     /// Random reordering, loss and duplication around a moving play position.
     #[test]
     fn randomised_arrival_keeps_order_and_bookkeeping() {
-        let mut rng = 0x2545_f491_4f6c_dd1du64;
-        let mut next_rand = move |n: u32| {
-            rng ^= rng << 13;
-            rng ^= rng >> 7;
-            rng ^= rng << 17;
-            (rng % n as u64) as u32
-        };
+        use rand::{RngExt, SeedableRng};
+        let mut rng = rand::rngs::SmallRng::seed_from_u64(1);
+        let mut next_rand = move |n: u32| rng.random_range(0..n);
         // Start just below the wrap to exercise it.
         let mut jb = JitterBuffer::new();
         let start = u32::MAX - 500;

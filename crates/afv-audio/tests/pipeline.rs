@@ -2,7 +2,6 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use afv_audio::codec::{Decoder, Encoder};
-use afv_audio::dsp::HfChannel;
 use afv_audio::radio::{Output, Signal};
 use afv_audio::{
     Bus, Carrier, EffectSamples, FRAME_SAMPLES, Frame, HfConditions, Pan, Radio, RadioSettings, RxChange, Transmitter,
@@ -322,25 +321,20 @@ fn render_one(callsign: &str, frequency: u32, radio: RadioSettings, conditions: 
 
 #[test]
 fn hf_propagation_shifts_voice_on_hf_radios_with_effects() {
+    // A tuning error anywhere within ±100 Hz; with this seed the station's is clearly audible.
     let conditions = HfConditions { offset_hz: 100.0, ..HfConditions::OFF };
-    // A station whose tuning error is clearly audible.
-    let (callsign, shift) = (0..)
-        .map(|n| format!("TEST{n}"))
-        .map(|c| {
-            let shift = HfChannel::for_callsign(&c).shift_hz(&conditions);
-            (c, shift)
-        })
-        .find(|(_, shift)| shift.abs() > 50.0)
-        .unwrap();
     let radio = RadioSettings { frequency: HF, ..RadioSettings::default() };
+    // The strongest tone between 850 and 1150 Hz, in 1 Hz steps.
+    let strongest =
+        |out: &[f32]| (850..=1150).max_by(|&a, &b| tone(out, a as f64).total_cmp(&tone(out, b as f64))).unwrap();
 
-    let out = render_one(&callsign, HF, radio.clone(), conditions);
-    let (shifted, original) = (tone(&out, 1000.0 + shift), tone(&out, 1000.0));
-    assert!(shifted > 5.0 * original, "{shift:+.0} Hz: {shifted} at the shifted tone, {original} at 1 kHz");
+    afv_audio::dsp::seed_rng(1);
+    let shifted = strongest(&render_one("SAS123", HF, radio.clone(), conditions));
+    assert!((shifted - 1000i32).abs() > 20, "the 1 kHz tone comes out at {shifted} Hz");
 
-    let clean = render_one(&callsign, HF, RadioSettings { effects: false, ..radio }, conditions);
-    let (shifted, original) = (tone(&clean, 1000.0 + shift), tone(&clean, 1000.0));
-    assert!(original > 5.0 * shifted, "effects off: {shifted} at the shifted tone, {original} at 1 kHz");
+    afv_audio::dsp::seed_rng(1);
+    let clean = strongest(&render_one("SAS123", HF, RadioSettings { effects: false, ..radio }, conditions));
+    assert_eq!(clean, 1000, "effects off");
 }
 
 #[test]

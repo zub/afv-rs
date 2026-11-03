@@ -139,14 +139,14 @@ impl Bus {
                 let mut stream = RemoteStream::new()?;
                 stream.agc_mut().set_target_db(self.agc_target_db);
                 stream.agc_mut().set_enabled(self.agc_enabled);
-                let carrier = Carrier::for_callsign(callsign);
+                let carrier = Carrier::random();
                 let talker = Talker {
                     stream,
                     carrier,
                     frame: Box::new([0.0; FRAME_SAMPLES]),
                     has_frame: false,
                     speech_processor: Compressor::default_for_rate(SAMPLE_RATE),
-                    hf: HfChannel::for_callsign(callsign),
+                    hf: HfChannel::new(),
                     hf_frame: Box::new([0.0; FRAME_SAMPLES]),
                     on_hf: false,
                     heard_on: Vec::with_capacity(4),

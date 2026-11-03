@@ -13,19 +13,18 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use afv_audio::{Bus, Carrier, EffectSamples, FRAME_SAMPLES, HfConditions, RadioSettings, Transmitter, VhfHardware};
+use afv_audio::{Bus, EffectSamples, FRAME_SAMPLES, HfConditions, RadioSettings, Transmitter, VhfHardware};
 use afv_proto::voice::RxTransceiver;
 
 const VHF: u32 = 118_500_000;
-/// North Atlantic HF frequencies. A radio's background is seeded from its frequency; these give
-/// each HF render at least one sounder (0.1 per second on average) while it plays.
-const HF_TWO_STATIONS: u32 = 13_291_000;
-const HF_PRESETS: [(&str, HfConditions, u32); 5] = [
-    ("off", HfConditions::OFF, 8_891_000),
-    ("good", HfConditions::GOOD, 5_616_000),
-    ("fair", HfConditions::FAIR, 5_649_000),
-    ("poor", HfConditions::POOR, 3_016_000),
-    ("flutter", HfConditions::FLUTTER, 2_899_000),
+/// A North Atlantic HF frequency.
+const HF: u32 = 8_891_000;
+const HF_PRESETS: [(&str, HfConditions); 5] = [
+    ("off", HfConditions::OFF),
+    ("good", HfConditions::GOOD),
+    ("fair", HfConditions::FAIR),
+    ("poor", HfConditions::POOR),
+    ("flutter", HfConditions::FLUTTER),
 ];
 /// Background kept after the last transmission, in frames: HF has no squelch, so 4 s of the band
 /// between transmissions; VHF only the squelch tail.
@@ -95,8 +94,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let (a, b) = (afv_audio::wav::load(a)?, afv_audio::wav::load(b)?);
     std::fs::create_dir_all(out)?;
-    let (ca, cb) = (Carrier::for_callsign("SAS123"), Carrier::for_callsign("NAX45F"));
-    println!("carriers {} Hz apart", (ca.offset_hz - cb.offset_hz).abs());
     let t = |callsign, audio, start_frame, distance_ratio| Talker { callsign, audio, start_frame, distance_ratio };
     let fair = HfConditions::FAIR;
     render(out, "1_single", VHF, VhfHardware::default(), fair, &[t("SAS123", &a, 10, 1.0)])?;
@@ -127,15 +124,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     render(
         out,
         "5_hf_equal_strength",
-        HF_TWO_STATIONS,
+        HF,
         VhfHardware::default(),
         fair,
         &[t("SAS123", &a, 10, 1.0), t("NAX45F", &b, 60, 1.0)],
     )?;
-    for (name, hf, frequency) in HF_PRESETS {
-        let shift = afv_audio::dsp::HfChannel::for_callsign("SAS123").shift_hz(&hf);
-        println!("HF {name}: SAS123 starts {shift:+.1} Hz off");
-        render(out, &format!("6_hf_{name}"), frequency, VhfHardware::default(), hf, &[t("SAS123", &a, 10, 1.0)])?;
+    for (name, hf) in HF_PRESETS {
+        render(out, &format!("6_hf_{name}"), HF, VhfHardware::default(), hf, &[t("SAS123", &a, 10, 1.0)])?;
     }
     for (name, hardware) in [
         ("schmid", VhfHardware::SchmidEd137b),

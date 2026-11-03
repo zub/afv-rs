@@ -14,19 +14,13 @@
 
 use std::ops::RangeInclusive;
 
+use rand::RngExt;
 use rand::rngs::SmallRng;
-use rand::{RngExt, SeedableRng};
 use rand_distr::{Exp1, Pareto, StandardNormal};
 
 use super::HfConditions;
-use crate::dsp::voice_rms;
+use crate::dsp::{voice_rms, with_rng};
 use crate::{Frame, SAMPLE_RATE};
-
-/// Mixed into seeds so that a radio's static, hiss and sounders draw unrelated random numbers
-/// from the same seed.
-const CRACKLE_STREAM: u64 = 0x7374_6174_6963_2121;
-const HISS_STREAM: u64 = 0x6869_7373_6869_7373;
-const SOUNDER_STREAM: u64 = 0x736f_756e_6465_7273;
 
 /// Random events at a rate that may change at any time (a Poisson process): each is due when the
 /// rate, summed over time, reaches an exponentially distributed draw. A change of rate therefore
@@ -84,7 +78,6 @@ struct Burst {
 /// receiver's sideband filter turns it into a blip (Motorola US 4,466,129).
 #[derive(Debug, Clone)]
 struct Crackle {
-    rng: SmallRng,
     arrivals: Arrivals,
     /// Samples left in the current run of crackling.
     run: u32,
@@ -94,9 +87,8 @@ struct Crackle {
 }
 
 impl Crackle {
-    fn new(seed: u64) -> Self {
-        let mut rng = SmallRng::seed_from_u64(seed ^ CRACKLE_STREAM);
-        Self { arrivals: Arrivals::new(&mut rng), rng, run: 0, bursts: [Burst::default(); MAX_BURSTS], crashes: 0 }
+    fn new(rng: &mut SmallRng) -> Self {
+        Self { arrivals: Arrivals::new(rng), run: 0, bursts: [Burst::default(); MAX_BURSTS], crashes: 0 }
     }
 
     /// Silences any impulse in progress.
@@ -105,11 +97,11 @@ impl Crackle {
         self.run = 0;
     }
 
-    fn crash(&mut self, level: f32) {
+    fn crash(&mut self, rng: &mut SmallRng, level: f32) {
         self.crashes += 1;
         // Heavy-tailed size: mostly about a tenth of the loudest, rarely the loudest itself.
         let sizes = Pareto::new(CRACKLE_SMALLEST, CRACKLE_SIZE_SHAPE).expect("valid parameters");
-        let size = self.rng.sample(sizes).min(1.0) as f32;
+        let size = rng.sample(sizes).min(1.0) as f32;
         // Larger crashes last a little longer.
         let tau_samples = (CRACKLE_SHORTEST_S + CRACKLE_LENGTH_RANGE_S * size as f64) * SAMPLE_RATE as f64;
         let amplitude = level * CRACKLE_MAX_RELATIVE * voice_rms() * size;
@@ -117,12 +109,12 @@ impl Crackle {
         let slot = self.bursts.iter_mut().min_by(|a, b| a.amplitude.total_cmp(&b.amplitude)).expect("MAX_BURSTS > 0");
         *slot = burst;
         if size > CRACKLE_RUN_THRESHOLD {
-            self.run = self.run.max(self.rng.random_range(CRACKLE_RUN_SAMPLES));
+            self.run = self.run.max(rng.random_range(CRACKLE_RUN_SAMPLES));
         }
     }
 
     /// Adds one frame of static under `conditions` to `out`.
-    fn add(&mut self, conditions: &HfConditions, out: &mut Frame) {
+    fn add(&mut self, rng: &mut SmallRng, conditions: &HfConditions, out: &mut Frame) {
         let (rate, level) = (conditions.crackle_rate_hz.max(0.0) as f64, conditions.crackle_level.clamp(0.0, 1.0));
         if rate == 0.0 || level == 0.0 {
             self.reset();
@@ -130,8 +122,8 @@ impl Crackle {
         }
         for o in out.iter_mut() {
             let rate = if self.run > 0 { rate * CRACKLE_RUN_RATE } else { rate };
-            for _ in 0..self.arrivals.tick(&mut self.rng, rate) {
-                self.crash(level);
+            for _ in 0..self.arrivals.tick(rng, rate) {
+                self.crash(rng, level);
             }
             self.run = self.run.saturating_sub(1);
 
@@ -140,7 +132,7 @@ impl Crackle {
                 envelope += b.amplitude;
                 b.amplitude *= b.decay;
             }
-            *o += self.rng.sample::<f32, _>(StandardNormal) * envelope;
+            *o += rng.sample::<f32, _>(StandardNormal) * envelope;
         }
     }
 }
@@ -152,28 +144,16 @@ const CHANNEL_HIGH_HZ: f64 = 3000.0;
 /// Share of white noise's power inside that channel: its width over the whole band.
 const CHANNEL_SHARE: f64 = (CHANNEL_HIGH_HZ - CHANNEL_LOW_HZ) / (SAMPLE_RATE as f64 / 2.0);
 
-/// The atmospheric noise floor: white noise, [`HfConditions::noise_level`] relative to the voice
-/// within a 300–3000 Hz channel.
-#[derive(Debug, Clone)]
-struct Hiss {
-    rng: SmallRng,
-}
-
-impl Hiss {
-    fn new(seed: u64) -> Self {
-        Self { rng: SmallRng::seed_from_u64(seed ^ HISS_STREAM) }
+/// Adds one frame of the atmospheric noise floor under `conditions` to `out`: white noise,
+/// [`HfConditions::noise_level`] relative to the voice within a 300–3000 Hz channel.
+fn add_hiss(rng: &mut SmallRng, conditions: &HfConditions, out: &mut Frame) {
+    let level = conditions.noise_level.max(0.0);
+    if level == 0.0 {
+        return;
     }
-
-    /// Adds one frame of hiss under `conditions` to `out`.
-    fn add(&mut self, conditions: &HfConditions, out: &mut Frame) {
-        let level = conditions.noise_level.max(0.0);
-        if level == 0.0 {
-            return;
-        }
-        let sigma = level * voice_rms() / CHANNEL_SHARE.sqrt() as f32;
-        for o in out.iter_mut() {
-            *o += sigma * self.rng.sample::<f32, _>(StandardNormal);
-        }
+    let sigma = level * voice_rms() / CHANNEL_SHARE.sqrt() as f32;
+    for o in out.iter_mut() {
+        *o += sigma * rng.sample::<f32, _>(StandardNormal);
     }
 }
 
@@ -220,7 +200,6 @@ struct Chirp {
 /// up (or, for the few that sweep downwards, down). Some arrive with an echo over a second path.
 #[derive(Debug, Clone)]
 struct Sounders {
-    rng: SmallRng,
     arrivals: Arrivals,
     chirps: [Chirp; MAX_CHIRPS],
     /// Sounders and echoes so far, for tests.
@@ -229,9 +208,8 @@ struct Sounders {
 }
 
 impl Sounders {
-    fn new(seed: u64) -> Self {
-        let mut rng = SmallRng::seed_from_u64(seed ^ SOUNDER_STREAM);
-        Self { arrivals: Arrivals::new(&mut rng), rng, chirps: [Chirp::default(); MAX_CHIRPS], passes: 0, echoes: 0 }
+    fn new(rng: &mut SmallRng) -> Self {
+        Self { arrivals: Arrivals::new(rng), chirps: [Chirp::default(); MAX_CHIRPS], passes: 0, echoes: 0 }
     }
 
     fn reset(&mut self) {
@@ -244,13 +222,13 @@ impl Sounders {
         }
     }
 
-    fn pass(&mut self, level: f32) {
+    fn pass(&mut self, rng: &mut SmallRng, level: f32) {
         self.passes += 1;
-        let rate = SOUNDER_SWEEP_RATES[self.rng.random_range(0..SOUNDER_SWEEP_RATES.len())];
-        let up = self.rng.random_bool(SOUNDER_UPWARD);
+        let rate = SOUNDER_SWEEP_RATES[rng.random_range(0..SOUNDER_SWEEP_RATES.len())];
+        let up = rng.random_bool(SOUNDER_UPWARD);
         let sweep = if up { rate } else { -rate } / SAMPLE_RATE as f64;
         let amplitude =
-            level * sounder_max_amplitude() * 10f32.powf(-SOUNDER_STRENGTH_SPREAD_DB / 20.0 * self.rng.random::<f32>());
+            level * sounder_max_amplitude() * 10f32.powf(-SOUNDER_STRENGTH_SPREAD_DB / 20.0 * rng.random::<f32>());
         let chirp = Chirp {
             wait: 0,
             frequency: if up { 0.0 } else { SOUNDER_SPAN_HZ },
@@ -260,24 +238,24 @@ impl Sounders {
             active: true,
         };
         self.start(chirp);
-        if self.rng.random_bool(SOUNDER_ECHO_CHANCE) {
-            let delay = self.rng.random_range(SOUNDER_ECHO_DELAY_S) * SAMPLE_RATE as f64;
-            let strength = self.rng.random_range(SOUNDER_ECHO_STRENGTH);
+        if rng.random_bool(SOUNDER_ECHO_CHANCE) {
+            let delay = rng.random_range(SOUNDER_ECHO_DELAY_S) * SAMPLE_RATE as f64;
+            let strength = rng.random_range(SOUNDER_ECHO_STRENGTH);
             self.start(Chirp { wait: delay as i64, amplitude: amplitude * strength, ..chirp });
             self.echoes += 1;
         }
     }
 
     /// Adds one frame of sounder blips under `conditions` to `out`.
-    fn add(&mut self, conditions: &HfConditions, out: &mut Frame) {
+    fn add(&mut self, rng: &mut SmallRng, conditions: &HfConditions, out: &mut Frame) {
         let (rate, level) = (conditions.sounder_rate_hz.max(0.0) as f64, conditions.sounder_level.clamp(0.0, 1.0));
         if rate == 0.0 || level == 0.0 {
             self.reset();
             return;
         }
         for o in out.iter_mut() {
-            for _ in 0..self.arrivals.tick(&mut self.rng, rate) {
-                self.pass(level);
+            for _ in 0..self.arrivals.tick(rng, rate) {
+                self.pass(rng, level);
             }
             for chirp in self.chirps.iter_mut().filter(|c| c.active) {
                 if chirp.wait > 0 {
@@ -294,17 +272,16 @@ impl Sounders {
 }
 
 /// Everything an HF receiver hears besides the signal: the noise floor, static and sounders.
-/// Add it ahead of the sideband filter. Deterministic for a given seed.
+/// Add it ahead of the sideband filter.
 #[derive(Debug, Clone)]
 pub(crate) struct Atmospherics {
-    hiss: Hiss,
     crackle: Crackle,
     sounders: Sounders,
 }
 
 impl Atmospherics {
-    pub(crate) fn new(seed: u64) -> Self {
-        Self { hiss: Hiss::new(seed), crackle: Crackle::new(seed), sounders: Sounders::new(seed) }
+    pub(crate) fn new() -> Self {
+        with_rng(|rng| Self { crackle: Crackle::new(rng), sounders: Sounders::new(rng) })
     }
 
     pub(crate) fn reset(&mut self) {
@@ -315,21 +292,29 @@ impl Atmospherics {
     /// Adds one frame of background under `conditions` to `out`.
     pub(crate) fn add(&mut self, conditions: &HfConditions, out: &mut Frame) {
         let c = conditions.sanitized();
-        self.hiss.add(&c, out);
-        self.crackle.add(&c, out);
-        self.sounders.add(&c, out);
+        with_rng(|rng| {
+            add_hiss(rng, &c, out);
+            self.crackle.add(rng, &c, out);
+            self.sounders.add(rng, &c, out);
+        });
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use rand::SeedableRng;
+
     use super::*;
     use crate::FRAME_SAMPLES;
     use crate::test_util::rms;
 
+    fn seeded(seed: u64) -> SmallRng {
+        SmallRng::seed_from_u64(seed)
+    }
+
     #[test]
     fn arrivals_follow_the_rate_and_change_with_it() {
-        let mut rng = SmallRng::seed_from_u64(1);
+        let mut rng = seeded(1);
         let mut a = Arrivals::new(&mut rng);
         let count = |a: &mut Arrivals, rng: &mut SmallRng, rate, seconds: u32| {
             (0..seconds * SAMPLE_RATE).map(|_| a.tick(rng, rate)).sum::<u32>()
@@ -347,12 +332,13 @@ mod tests {
 
     /// `seconds` of static from a fresh generator.
     fn static_for(c: &HfConditions, seconds: usize, seed: u64) -> (Vec<f32>, Crackle) {
-        let mut statics = Crackle::new(seed);
+        let mut rng = seeded(seed);
+        let mut statics = Crackle::new(&mut rng);
         let mut frame = [0.0; FRAME_SAMPLES];
         let out = (0..seconds * 50)
             .flat_map(|_| {
                 frame.fill(0.0);
-                statics.add(c, &mut frame);
+                statics.add(&mut rng, c, &mut frame);
                 frame
             })
             .collect();
@@ -380,14 +366,15 @@ mod tests {
     #[test]
     fn crashes_come_in_runs() {
         // Without runs, crashes at 1/s would follow each other within 40 ms about 4 % of the time.
-        let mut statics = Crackle::new(10);
+        let mut rng = seeded(10);
+        let mut statics = Crackle::new(&mut rng);
         let mut frame = [0.0; FRAME_SAMPLES];
         let c = crackle(1.0, 1.0);
         let mut last = None;
         let mut gaps = Vec::new();
         for n in 0..50 * 600 {
             let before = statics.crashes;
-            statics.add(&c, &mut frame);
+            statics.add(&mut rng, &c, &mut frame);
             for _ in before..statics.crashes {
                 if let Some(last) = last {
                     gaps.push(n - last);
@@ -420,30 +407,32 @@ mod tests {
 
     #[test]
     fn rate_changes_apply_at_once() {
-        let mut statics = Crackle::new(8);
+        let mut rng = seeded(8);
+        let mut statics = Crackle::new(&mut rng);
         let mut frame = [0.0; FRAME_SAMPLES];
         // A very slow rate first, so the first crash would be far away if never redrawn.
         for _ in 0..50 {
-            statics.add(&crackle(0.001, 1.0), &mut frame);
+            statics.add(&mut rng, &crackle(0.001, 1.0), &mut frame);
         }
         let before = statics.crashes;
         for _ in 0..50 {
-            statics.add(&crackle(20.0, 1.0), &mut frame);
+            statics.add(&mut rng, &crackle(20.0, 1.0), &mut frame);
         }
         assert!(statics.crashes - before >= 5, "{} crashes in the first second at 20/s", statics.crashes - before);
         // Turning it off silences the very next frame, bursts in progress included.
         frame.fill(0.0);
-        statics.add(&crackle(20.0, 0.0), &mut frame);
+        statics.add(&mut rng, &crackle(20.0, 0.0), &mut frame);
         assert!(frame.iter().all(|&s| s == 0.0));
     }
 
     #[test]
     fn reset_cuts_the_static() {
-        let mut statics = Crackle::new(9);
+        let mut rng = seeded(9);
+        let mut statics = Crackle::new(&mut rng);
         let mut frame = [0.0; FRAME_SAMPLES];
         let c = crackle(50.0, 1.0);
         for _ in 0..10 {
-            statics.add(&c, &mut frame);
+            statics.add(&mut rng, &c, &mut frame);
         }
         statics.reset();
         assert!(statics.bursts.iter().all(|b| b.amplitude == 0.0));
@@ -453,13 +442,13 @@ mod tests {
     fn hiss_sits_at_its_level_relative_to_the_voice() {
         for level in [0.1f32, 1.0] {
             let c = HfConditions { noise_level: level, ..HfConditions::OFF };
-            let (mut hiss, mut channel) =
-                (Hiss::new(1), crate::dsp::Cascade::<8>::band_pass(CHANNEL_LOW_HZ, CHANNEL_HIGH_HZ, 0.0));
+            let (mut rng, mut channel) =
+                (seeded(1), crate::dsp::Cascade::<8>::band_pass(CHANNEL_LOW_HZ, CHANNEL_HIGH_HZ, 0.0));
             let mut frame = [0.0; FRAME_SAMPLES];
             let out: Vec<f32> = (0..250)
                 .flat_map(|_| {
                     frame.fill(0.0);
-                    hiss.add(&c, &mut frame);
+                    add_hiss(&mut rng, &c, &mut frame);
                     channel.process(&mut frame);
                     frame
                 })
@@ -472,7 +461,7 @@ mod tests {
             );
         }
         let mut frame = [0.0; FRAME_SAMPLES];
-        Hiss::new(1).add(&HfConditions::OFF, &mut frame);
+        add_hiss(&mut seeded(1), &HfConditions::OFF, &mut frame);
         assert!(frame.iter().all(|&s| s == 0.0));
     }
 
@@ -480,12 +469,12 @@ mod tests {
         HfConditions { sounder_rate_hz: rate, sounder_level: level, ..HfConditions::OFF }
     }
 
-    fn run_sounders(s: &mut Sounders, c: &HfConditions, frames: usize) -> Vec<f32> {
+    fn run_sounders(s: &mut Sounders, rng: &mut SmallRng, c: &HfConditions, frames: usize) -> Vec<f32> {
         let mut frame = [0.0; FRAME_SAMPLES];
         (0..frames)
             .flat_map(|_| {
                 frame.fill(0.0);
-                s.add(c, &mut frame);
+                s.add(rng, c, &mut frame);
                 frame
             })
             .collect()
@@ -493,14 +482,16 @@ mod tests {
 
     #[test]
     fn sounders_pass_at_their_rate_half_with_echoes() {
-        let mut s = Sounders::new(1);
-        run_sounders(&mut s, &sounders(0.5, 1.0), 50 * 600);
+        let mut rng = seeded(1);
+        let mut s = Sounders::new(&mut rng);
+        run_sounders(&mut s, &mut rng, &sounders(0.5, 1.0), 50 * 600);
         assert!((240..=360).contains(&s.passes), "{} passes in 600 s at 0.5/s", s.passes);
         let echoes = s.echoes as f64 / s.passes as f64;
         assert!((0.4..0.6).contains(&echoes), "{:.0} % with an echo", echoes * 100.0);
         for c in [sounders(0.0, 1.0), sounders(1.0, 0.0)] {
-            let mut s = Sounders::new(2);
-            assert!(run_sounders(&mut s, &c, 500).iter().all(|&x| x == 0.0));
+            let mut rng = seeded(2);
+            let mut s = Sounders::new(&mut rng);
+            assert!(run_sounders(&mut s, &mut rng, &c, 500).iter().all(|&x| x == 0.0));
             assert_eq!(s.passes, 0);
         }
     }
@@ -509,10 +500,11 @@ mod tests {
     fn a_sounder_is_a_short_sweep() {
         // One pass at a time: start it by hand, with the rate so low that no other follows.
         for seed in 0..20 {
-            let mut s = Sounders::new(seed);
+            let mut rng = seeded(seed);
+            let mut s = Sounders::new(&mut rng);
             let c = sounders(1e-9, 1.0);
-            s.pass(1.0);
-            let out = run_sounders(&mut s, &c, 10);
+            s.pass(&mut rng, 1.0);
+            let out = run_sounders(&mut s, &mut rng, &c, 10);
             let active: Vec<usize> = (0..out.len()).filter(|&i| out[i] != 0.0).collect();
             let (first, last) = (active[0], *active.last().unwrap());
             let ms = (last - first) as f64 / 48.0;
@@ -529,9 +521,10 @@ mod tests {
 
     #[test]
     fn sounder_level_scales_them() {
-        let (mut a, mut b) = (Sounders::new(3), Sounders::new(3));
-        let full = run_sounders(&mut a, &sounders(2.0, 1.0), 500);
-        let half = run_sounders(&mut b, &sounders(2.0, 0.5), 500);
+        let (mut rng_a, mut rng_b) = (seeded(3), seeded(3));
+        let (mut a, mut b) = (Sounders::new(&mut rng_a), Sounders::new(&mut rng_b));
+        let full = run_sounders(&mut a, &mut rng_a, &sounders(2.0, 1.0), 500);
+        let half = run_sounders(&mut b, &mut rng_b, &sounders(2.0, 0.5), 500);
         assert!(full.iter().any(|&x| x != 0.0));
         assert!(full.iter().zip(&half).all(|(f, h)| (0.5 * f - h).abs() < 1e-6));
         assert!(full.iter().all(|x| x.abs() <= 2.0 * sounder_max_amplitude()), "an echo can overlap its sounder");
@@ -539,7 +532,8 @@ mod tests {
 
     #[test]
     fn bad_settings_do_not_break_the_background() {
-        let mut a = Atmospherics::new(1);
+        crate::dsp::seed_rng(1);
+        let mut a = Atmospherics::new();
         let mut frame = [0.0; FRAME_SAMPLES];
         let bad = HfConditions {
             noise_level: f32::NAN,

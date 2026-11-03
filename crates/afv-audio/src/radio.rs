@@ -161,7 +161,6 @@ fn mix(dst: &mut Frame, src: &Frame, gain: f32) {
 
 impl Radio {
     pub fn new(settings: RadioSettings) -> Self {
-        let seed = settings.frequency as u64;
         Self {
             set: radio_set(&settings),
             settings,
@@ -173,7 +172,7 @@ impl Radio {
             ac_bus: None,
             am: AmChannel::new(),
             hf_conditions: HfConditions::default(),
-            atmospherics: Atmospherics::new(seed),
+            atmospherics: Atmospherics::new(),
             rx_count: 0,
             channel: Box::new([0.0; FRAME_SAMPLES]),
             fetch: Box::new([0.0; FRAME_SAMPLES]),

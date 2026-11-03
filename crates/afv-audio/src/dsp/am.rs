@@ -8,6 +8,8 @@
 //! heterodyne whistle at the carrier difference, and the weak voice ring-modulated by that
 //! difference. Two equally strong signals distort each other heavily.
 
+use rand::RngExt;
+
 use crate::{FRAME_SAMPLES, Frame, SAMPLE_RATE};
 
 /// Pole of the DC blocker that stands in for the receiver's AC coupling (about 40 Hz).
@@ -23,15 +25,17 @@ pub struct Carrier {
 }
 
 impl Carrier {
-    /// Largest offset [`Carrier::for_callsign`] picks.
+    /// Largest offset [`Carrier::random`] picks.
     pub const MAX_OFFSET_HZ: i16 = 600;
 
-    /// A carrier derived from the callsign, so that a given pair of stations always beats at the
+    /// A transmitter's carrier, anywhere within ±[`MAX_OFFSET_HZ`](Self::MAX_OFFSET_HZ). Keep it
+    /// for as long as the station is heard, so that a given pair of stations keeps beating at the
     /// same frequency, as real ones do.
-    pub fn for_callsign(callsign: &str) -> Self {
-        let h = super::callsign_hash(callsign);
-        let span = 2 * Self::MAX_OFFSET_HZ as u64 + 1;
-        Self { offset_hz: (h % span) as i16 - Self::MAX_OFFSET_HZ, phase: ((h >> 32) % SAMPLE_RATE as u64) as u16 }
+    pub fn random() -> Self {
+        super::with_rng(|rng| Self {
+            offset_hz: rng.random_range(-Self::MAX_OFFSET_HZ..=Self::MAX_OFFSET_HZ),
+            phase: rng.random_range(0..SAMPLE_RATE as u16),
+        })
     }
 }
 
@@ -142,18 +146,17 @@ mod tests {
     }
 
     #[test]
-    fn carrier_for_callsign_is_stable_and_bounded() {
-        assert_eq!(Carrier::for_callsign("SAS123"), Carrier::for_callsign("SAS123"));
-        for cs in ["SAS123", "ENGM_TWR", "NAX45F", "A", ""] {
-            let c = Carrier::for_callsign(cs);
+    fn random_carriers_are_bounded() {
+        for _ in 0..1000 {
+            let c = Carrier::random();
             assert!(c.offset_hz.abs() <= Carrier::MAX_OFFSET_HZ && (c.phase as u32) < SAMPLE_RATE, "{c:?}");
         }
-        assert_ne!(Carrier::for_callsign("SAS123"), Carrier::for_callsign("SAS124"));
     }
 
     #[test]
     fn carrier_offsets_cover_the_range() {
-        let offsets: Vec<i16> = (0..2000).map(|i| Carrier::for_callsign(&format!("TEST{i}")).offset_hz).collect();
+        crate::dsp::seed_rng(1);
+        let offsets: Vec<i16> = (0..2000).map(|_| Carrier::random().offset_hz).collect();
         let max = Carrier::MAX_OFFSET_HZ;
         assert!(offsets.iter().any(|&o| o < -max / 2) && offsets.iter().any(|&o| o > max / 2));
         let mean = offsets.iter().map(|&o| o as f64).sum::<f64>() / offsets.len() as f64;
