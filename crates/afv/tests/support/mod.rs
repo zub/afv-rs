@@ -40,6 +40,9 @@ pub struct Fake {
     pub transceiver_posts: Mutex<Vec<Vec<Transceiver>>>,
     /// Delay before answering transceiver posts (recorded on arrival).
     pub transceiver_delay_ms: AtomicU64,
+    /// Transceiver posts being answered right now, and the most there ever were at once.
+    pub transceiver_posts_in_flight: AtomicU32,
+    pub max_transceiver_posts_in_flight: AtomicU32,
     /// Answer transceiver posts with HTTP 500.
     pub fail_transceivers: AtomicBool,
     pub cross_couple_posts: Mutex<Vec<Vec<CrossCoupleGroup>>>,
@@ -210,10 +213,13 @@ async fn transceivers(
         return StatusCode::UNAUTHORIZED;
     }
     fake.transceiver_posts.lock().unwrap().push(body);
+    let in_flight = fake.transceiver_posts_in_flight.fetch_add(1, SeqCst) + 1;
+    fake.max_transceiver_posts_in_flight.fetch_max(in_flight, SeqCst);
     let delay = fake.transceiver_delay_ms.load(SeqCst);
     if delay > 0 {
         tokio::time::sleep(Duration::from_millis(delay)).await;
     }
+    fake.transceiver_posts_in_flight.fetch_sub(1, SeqCst);
     if fake.fail_transceivers.load(SeqCst) { StatusCode::INTERNAL_SERVER_ERROR } else { StatusCode::OK }
 }
 

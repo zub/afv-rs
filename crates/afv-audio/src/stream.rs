@@ -190,6 +190,26 @@ mod tests {
     }
 
     #[test]
+    fn keying_again_soon_after_a_last_packet_is_heard() {
+        let p = packets(20);
+        let t0 = Instant::now();
+        let mut s = RemoteStream::new().unwrap();
+        let mut f = [0.0; FRAME_SAMPLES];
+        s.push(0, &p[0], false, &rx(1), t0);
+        s.push(1, &p[1], true, &rx(1), t0);
+        while s.next_frame(&mut f) {}
+        // 200 ms later, well within NEW_TRANSMISSION_GAP; the sequence kept counting.
+        let t1 = t0 + Duration::from_millis(200);
+        let mut played = 0;
+        for (i, packet) in p.iter().enumerate().skip(2) {
+            s.push(10 + i as u32, packet, false, &rx(1), t1);
+            played += s.next_frame(&mut f) as usize;
+        }
+        assert_eq!(played, 18);
+        assert!(rms(&f) > 0.1, "rms {}", rms(&f));
+    }
+
+    #[test]
     fn transceivers_follow_the_latest_packet() {
         let p = packets(2);
         let mut s = RemoteStream::new().unwrap();

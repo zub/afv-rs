@@ -92,6 +92,23 @@ async fn degrades_and_recovers() {
 }
 
 #[tokio::test]
+async fn transceiver_posts_never_overlap() {
+    // Slow answers and a refresh faster than them: without ordering, a refresh carrying the old
+    // set could reach the server after the update that replaced it.
+    let server = FakeServer::start().await;
+    let timing = afv::Timing { transceiver_refresh: Duration::from_millis(30), ..fast_timing() };
+    let session = server.builder().timing(timing).connect().await.unwrap();
+    server.fake.transceiver_delay_ms.store(50, SeqCst);
+    session.set_transceivers(vec![transceiver(0, 122_800_000)]).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    session.set_transceivers(vec![transceiver(0, 121_500_000)]).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(server.transceiver_post_count() >= 4);
+    assert_eq!(server.fake.max_transceiver_posts_in_flight.load(SeqCst), 1);
+    assert_eq!(server.last_transceivers().unwrap(), [transceiver(0, 121_500_000)]);
+}
+
+#[tokio::test]
 async fn heartbeat_timeout_reconnects_and_restores_transceivers() {
     let server = FakeServer::start().await;
     let session = server.builder().connect().await.unwrap();

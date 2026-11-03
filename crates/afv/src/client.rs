@@ -300,8 +300,12 @@ impl Inner {
             let mut state = self.lock();
             let plan = state.plan();
             if !plan.differs_from(&state.acked) {
-                // Only positions changed: they go out with the next periodic refresh.
-                self.shared.store_transceivers(plan.transceivers);
+                // Only positions or the tx selection changed. The server's ids and frequencies
+                // are current, so the new tx set applies at once; positions go out with the
+                // next periodic refresh.
+                self.audio.set_tx_transceivers(&plan.tx);
+                self.shared.store_transceivers(plan.transceivers.clone());
+                state.acked = plan;
                 return;
             }
             state.in_flight = true;

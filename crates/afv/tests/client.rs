@@ -177,6 +177,33 @@ async fn transmits_captured_audio_on_the_tx_transceivers() {
 }
 
 #[tokio::test]
+async fn moving_tx_to_another_radio_transmits_there() {
+    let server = FakeServer::start().await;
+    let client = server.client_builder().connect().await.unwrap();
+    let mut events = client.events();
+    client.set_position(POS);
+    let com1 = client.add_radio(tx_radio("122.800"));
+    let com2 = client.add_radio(RadioConfig::pilot(freq("121.500")));
+    wait_event(&mut events, |e| matches!(e, Event::TransceiversSynced)).await;
+    let posts = server.transceiver_post_count();
+
+    // The transmit selector moves from COM1 to COM2: the server's transceivers stay the same.
+    client.update_radio(com1, |r| r.tx = false);
+    client.update_radio(com2, |r| r.tx = true);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(server.transceiver_post_count(), posts, "nothing to tell the server");
+    client.set_ptt(true);
+    assert!(client.ptt_open());
+    let audio = client.audio();
+    for _ in 0..5 {
+        audio.capture(&[0.1; 960], 48_000, 1).unwrap();
+    }
+    eventually("audio to arrive", || server.fake.audio.lock().unwrap().len() >= 5).await;
+    assert!(server.fake.audio.lock().unwrap().iter().all(|a| a.transceivers == [1]), "sent on COM2 only");
+    client.disconnect().await;
+}
+
+#[tokio::test]
 async fn received_audio_is_played_and_reported_per_radio() {
     let server = FakeServer::start().await;
     let client = server.client_builder().connect().await.unwrap();

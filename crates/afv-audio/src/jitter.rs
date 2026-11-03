@@ -4,7 +4,8 @@
 //! buffered (or the transmission's last packet has arrived), then advances one sequence per frame.
 //! A gap yields [`Pop::Missing`] so the decoder can conceal it. Packets arriving after their slot
 //! was played count as late and raise the target delay; a backlog beyond the target plus
-//! a few frames is skipped to bound latency. Storage is fixed, so pushing and popping never
+//! a few frames is skipped to bound latency. Once the last packet has played, the buffer
+//! starts over for the talker's next transmission. Storage is fixed, so pushing and popping never
 //! allocate.
 
 /// Largest Opus packet (RFC 6716 §3.4).
@@ -43,6 +44,9 @@ pub struct JitterBuffer {
     next: Option<u32>,
     target: u32,
     end: Option<u32>,
+    /// Last sequence of the transmission played out most recently; stragglers up to it are
+    /// dropped while the next transmission buffers.
+    finished: Option<u32>,
     buffered: u32,
 }
 
@@ -60,7 +64,7 @@ impl Default for JitterBuffer {
 impl JitterBuffer {
     pub fn new() -> Self {
         let slots = (0..CAPACITY).map(|_| Slot { sequence: 0, len: 0, filled: false, data: [0; MAX_PACKET] }).collect();
-        Self { slots, next: None, target: MIN_TARGET, end: None, buffered: 0 }
+        Self { slots, next: None, target: MIN_TARGET, end: None, finished: None, buffered: 0 }
     }
 
     /// Frames currently held.
@@ -82,12 +86,19 @@ impl JitterBuffer {
         self.slots.iter_mut().for_each(|s| s.filled = false);
         self.next = None;
         self.end = None;
+        self.finished = None;
         self.buffered = 0;
     }
 
     /// Stores a packet. Returns `false` if it was dropped (late, duplicate or oversized).
     pub fn push(&mut self, sequence: u32, packet: &[u8], last: bool) -> bool {
         if packet.len() > MAX_PACKET {
+            return false;
+        }
+        if self.next.is_none()
+            && let Some(finished) = self.finished
+            && (0..CAPACITY as i32).contains(&diff(finished, sequence))
+        {
             return false;
         }
         if let Some(next) = self.next {
@@ -140,6 +151,11 @@ impl JitterBuffer {
         if let Some(end) = self.end
             && diff(next, end) > 0
         {
+            // Played out. Packets of the next transmission, including any already here,
+            // buffer up from scratch.
+            self.finished = Some(end);
+            self.next = None;
+            self.end = None;
             return Pop::Ended;
         }
         // Bound latency: skip ahead if far more than the target is buffered.
@@ -301,7 +317,36 @@ mod tests {
         assert_eq!(jb.pop(), Pop::Missing);
         assert_eq!(jb.pop(), Pop::Packet(&pkt(2)));
         assert_eq!(jb.pop(), Pop::Ended);
+        assert_eq!(jb.pop(), Pop::NotReady);
+    }
+
+    #[test]
+    fn the_next_transmission_plays_after_an_end() {
+        // The sender's counter keeps running between transmissions.
+        let mut jb = JitterBuffer::new();
+        jb.push(0, &pkt(0), false);
+        jb.push(1, &pkt(1), true);
+        jb.push(15, &pkt(15), false);
+        assert_eq!(jb.pop(), Pop::Packet(&pkt(0)));
+        assert_eq!(jb.pop(), Pop::Packet(&pkt(1)));
         assert_eq!(jb.pop(), Pop::Ended);
+        assert!(!jb.push(1, &pkt(1), true), "a straggler of the ended transmission");
+        assert_eq!(jb.pop(), Pop::NotReady);
+        jb.push(16, &pkt(16), false);
+        assert_eq!(jb.pop(), Pop::Packet(&pkt(15)));
+        assert_eq!(jb.pop(), Pop::Packet(&pkt(16)));
+    }
+
+    #[test]
+    fn a_restarted_counter_plays_after_an_end() {
+        let mut jb = JitterBuffer::new();
+        jb.push(5000, &pkt(5000), true);
+        assert_eq!(jb.pop(), Pop::Packet(&pkt(5000)));
+        assert_eq!(jb.pop(), Pop::Ended);
+        jb.push(0, &pkt(0), false);
+        jb.push(1, &pkt(1), false);
+        assert_eq!(jb.pop(), Pop::Packet(&pkt(0)));
+        assert_eq!(jb.target(), MIN_TARGET, "not counted as late");
     }
 
     /// Random reordering, loss and duplication around a moving play position.

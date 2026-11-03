@@ -2,7 +2,8 @@
 //!
 //! Audio APIs call back on real-time threads that must not block, allocate or wait on a network.
 //! The bridge gives each callback a [`Capture`] or [`Playback`] handle that only moves samples
-//! through a lock-free ring buffer and wakes a worker thread; the worker does all decoding,
+//! through a lock-free ring buffer and wakes a worker thread. Both sides move whole interleaved
+//! frames only, so a ring that runs full or empty never shifts the channels; the worker does all decoding,
 //! mixing, encoding and sending through [`Audio::capture`] and [`Audio::render`].
 //!
 //! Use it to connect an audio API other than `cpal`; the `cpal` backend in [`crate::devices`]
@@ -32,6 +33,11 @@ pub struct Format {
     pub channels: u16,
 }
 
+/// `n` samples rounded down to whole frames of `channels`.
+fn whole(n: usize, channels: usize) -> usize {
+    n - n % channels
+}
+
 impl Format {
     fn ring_len(self) -> usize {
         (self.sample_rate as f64 * RING.as_secs_f64()) as usize * self.channels as usize
@@ -41,21 +47,21 @@ impl Format {
 /// Feeds microphone samples from a real-time callback.
 pub struct Capture {
     ring: Producer<f32>,
+    channels: usize,
     wake: Thread,
 }
 
 impl Capture {
-    /// Queues interleaved samples. Real-time safe. Samples that do not fit are dropped.
+    /// Queues interleaved samples. Real-time safe. Frames that do not fit are dropped.
     pub fn push(&mut self, samples: &[f32]) {
         self.push_map(samples, |s| s);
     }
 
     /// Like [`Capture::push`], converting each sample from the device format.
     pub fn push_map<T: Copy>(&mut self, samples: &[T], convert: impl Fn(T) -> f32) {
-        for &s in samples {
-            if self.ring.push(convert(s)).is_err() {
-                break;
-            }
+        let n = whole(samples.len().min(self.ring.slots()), self.channels);
+        if let Ok(chunk) = self.ring.write_chunk_uninit(n) {
+            chunk.fill_from_iter(samples[..n].iter().map(|&s| convert(s)));
         }
         self.wake.unpark();
     }
@@ -64,6 +70,7 @@ impl Capture {
 /// Takes rendered samples in a real-time callback.
 pub struct Playback {
     ring: Consumer<f32>,
+    channels: usize,
     last_request: Arc<AtomicUsize>,
     wake: Thread,
 }
@@ -77,8 +84,15 @@ impl Playback {
     /// Like [`Playback::fill`], converting each sample to the device format.
     pub fn fill_map<T>(&mut self, out: &mut [T], convert: impl Fn(f32) -> T) {
         self.last_request.store(out.len(), Relaxed);
-        for o in out.iter_mut() {
-            *o = convert(self.ring.pop().unwrap_or(0.0));
+        let mut filled = 0;
+        if let Ok(chunk) = self.ring.read_chunk(whole(out.len().min(self.ring.slots()), self.channels)) {
+            filled = chunk.len();
+            for (o, s) in out.iter_mut().zip(chunk) {
+                *o = convert(s);
+            }
+        }
+        for o in &mut out[filled..] {
+            *o = convert(0.0);
         }
         self.wake.unpark();
     }
@@ -136,7 +150,10 @@ pub fn bridge(
     let (capture, capture_side) = match mic {
         Some(format) => {
             let (producer, consumer) = RingBuffer::new(format.ring_len());
-            (Some(Capture { ring: producer, wake: wake.clone() }), Some(CaptureSide { ring: consumer, format }))
+            (
+                Some(Capture { ring: producer, channels: format.channels as usize, wake: wake.clone() }),
+                Some(CaptureSide { ring: consumer, format }),
+            )
         }
         None => (None, None),
     };
@@ -145,7 +162,12 @@ pub fn bridge(
     for &(bus, format) in outputs {
         let (producer, consumer) = RingBuffer::new(format.ring_len());
         let last_request = Arc::new(AtomicUsize::new(0));
-        playback.push(Playback { ring: consumer, last_request: last_request.clone(), wake: wake.clone() });
+        playback.push(Playback {
+            ring: consumer,
+            channels: format.channels as usize,
+            last_request: last_request.clone(),
+            wake: wake.clone(),
+        });
         playback_sides.push(PlaybackSide { bus, ring: producer, format, last_request });
     }
     let _ = sides_tx.send((capture_side, playback_sides));
@@ -158,7 +180,9 @@ fn run(audio: &Audio, stop: &AtomicBool, mut capture: Option<CaptureSide>, mut p
         thread::park_timeout(IDLE_WAKE);
         if let Some(c) = &mut capture {
             buf.clear();
-            buf.extend(std::iter::from_fn(|| c.ring.pop().ok()));
+            if let Ok(chunk) = c.ring.read_chunk(whole(c.ring.slots(), c.format.channels as usize)) {
+                buf.extend(chunk);
+            }
             if let Err(e) = audio.capture(&buf, c.format.sample_rate, c.format.channels) {
                 tracing::error!("microphone: {e}");
                 capture = None;
@@ -180,11 +204,42 @@ fn run(audio: &Audio, stop: &AtomicBool, mut capture: Option<CaptureSide>, mut p
                 tracing::error!("{:?} output: {e}", p.bus);
                 continue;
             }
-            for &s in &buf {
-                if p.ring.push(s).is_err() {
-                    break;
-                }
+            // Fits: only this thread fills the ring, and it had room for `buf`.
+            if let Ok(chunk) = p.ring.write_chunk_uninit(buf.len()) {
+                chunk.fill_from_iter(buf.iter().copied());
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn playback_never_splits_a_frame() {
+        let (mut producer, consumer) = RingBuffer::new(16);
+        let mut playback =
+            Playback { ring: consumer, channels: 2, last_request: Arc::default(), wake: thread::current() };
+        // The worker is caught mid-frame: L of the second frame is in, R is not yet.
+        for s in [1.0, -1.0, 2.0] {
+            producer.push(s).unwrap();
+        }
+        let mut out = [9.0; 4];
+        playback.fill(&mut out);
+        assert_eq!(out, [1.0, -1.0, 0.0, 0.0], "underrun is whole frames of silence");
+        producer.push(-2.0).unwrap();
+        playback.fill(&mut out);
+        assert_eq!(out, [2.0, -2.0, 0.0, 0.0], "left stays left");
+    }
+
+    #[test]
+    fn capture_drops_whole_frames_when_full() {
+        let (producer, mut consumer) = RingBuffer::new(5);
+        let mut capture = Capture { ring: producer, channels: 2, wake: thread::current() };
+        capture.push(&[1.0, -1.0, 2.0, -2.0, 3.0, -3.0]);
+        assert_eq!(consumer.slots(), 4);
+        let chunk = consumer.read_chunk(4).unwrap();
+        assert_eq!(chunk.into_iter().collect::<Vec<_>>(), [1.0, -1.0, 2.0, -2.0]);
     }
 }

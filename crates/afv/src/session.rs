@@ -10,6 +10,7 @@ use afv_proto::api::{CrossCoupleGroup, Station, StationTransceiver, Transceiver}
 use afv_proto::voice::{AudioRx, AudioTx, Dto, Heartbeat};
 use afv_proto::{Channel, Message};
 use tokio::net::UdpSocket;
+use tokio::sync::Mutex as AsyncMutex;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, MissedTickBehavior, interval_at, sleep, sleep_until};
@@ -134,6 +135,9 @@ pub(crate) struct Shared {
     link: Mutex<Option<Link>>,
     transceivers: Mutex<Vec<Transceiver>>,
     cross_couple_groups: Mutex<Option<Vec<CrossCoupleGroup>>>,
+    /// Held while posting transceivers or cross-couple groups, so that posts reach the server
+    /// in order and a periodic refresh cannot overwrite a newer update with an older one.
+    posting: AsyncMutex<()>,
     state: watch::Sender<SessionState>,
     incoming_audio: mpsc::Sender<AudioRx>,
     incoming_audio_rx: Mutex<Option<mpsc::Receiver<AudioRx>>>,
@@ -167,6 +171,7 @@ impl Session {
             link: Mutex::new(None),
             transceivers: Mutex::new(Vec::new()),
             cross_couple_groups: Mutex::new(None),
+            posting: AsyncMutex::new(()),
             state: watch::Sender::new(SessionState::Disconnected(None)),
             incoming_audio: audio_tx,
             incoming_audio_rx: Mutex::new(Some(audio_rx)),
@@ -274,6 +279,7 @@ impl Shared {
     }
 
     pub(crate) async fn set_transceivers(&self, transceivers: Vec<Transceiver>) -> Result<()> {
+        let _posting = self.posting.lock().await;
         *self.transceivers.lock().unwrap() = transceivers.clone();
         self.api.post_transceivers(&transceivers).await
     }
@@ -284,6 +290,7 @@ impl Shared {
     }
 
     pub(crate) async fn set_cross_couple_groups(&self, groups: Vec<CrossCoupleGroup>) -> Result<()> {
+        let _posting = self.posting.lock().await;
         *self.cross_couple_groups.lock().unwrap() = Some(groups.clone());
         self.api.post_cross_couple_groups(&groups).await
     }
@@ -326,6 +333,8 @@ impl Shared {
 
     /// Re-sends the stored transceivers and cross-couple groups, logging failures.
     async fn post_transceivers(&self) {
+        // Read the stored sets only once it is our turn, so they are the newest.
+        let _posting = self.posting.lock().await;
         let transceivers = self.transceivers.lock().unwrap().clone();
         if !transceivers.is_empty()
             && let Err(e) = self.api.post_transceivers(&transceivers).await
