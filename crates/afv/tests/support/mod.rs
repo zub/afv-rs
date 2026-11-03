@@ -11,7 +11,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use afv::proto::api::{
     AuthRequest, CrossCoupleGroup, PostCallsignResponse, Station, StationTransceiver, Transceiver, VoiceServer,
 };
-use afv::proto::voice::{AudioRx, AudioTx, HeartbeatAck};
+use afv::proto::voice::{AudioRx, AudioTx, HeartbeatAck, RxTransceiver};
 use afv::proto::{Channel, ChannelConfig, Message};
 use afv::{SessionState, Timing};
 use axum::extract::{Path, State};
@@ -38,8 +38,15 @@ pub struct Fake {
     /// Ignore every datagram.
     pub silent: AtomicBool,
     pub transceiver_posts: Mutex<Vec<Vec<Transceiver>>>,
+    /// Delay before answering transceiver posts (recorded on arrival).
+    pub transceiver_delay_ms: AtomicU64,
+    /// Answer transceiver posts with HTTP 500.
+    pub fail_transceivers: AtomicBool,
     pub cross_couple_posts: Mutex<Vec<Vec<CrossCoupleGroup>>>,
     pub audio: Mutex<Vec<AudioTx>>,
+    /// Play each transmission back to the sender as station `ECHO` once it ends.
+    pub echo: AtomicBool,
+    echo_buffer: Mutex<Vec<AudioTx>>,
     tokens: Mutex<HashSet<String>>,
     channel: Mutex<Option<Channel>>,
     client: Mutex<Option<SocketAddr>>,
@@ -85,7 +92,24 @@ impl FakeServer {
         self.udp.send_to(&datagram, client).await.unwrap();
     }
 
-    pub fn builder(&self) -> afv::ClientBuilder {
+    /// A client builder with the slow refresh disabled, so tests see only change-driven posts.
+    pub fn client_builder(&self) -> afv::ClientBuilder {
+        afv::Client::builder()
+            .api_url(&self.api_url)
+            .credentials(USERNAME, PASSWORD)
+            .callsign("SAS123")
+            .timing(Timing { transceiver_refresh: Duration::from_secs(600), ..fast_timing() })
+    }
+
+    pub fn last_transceivers(&self) -> Option<Vec<Transceiver>> {
+        self.fake.transceiver_posts.lock().unwrap().last().cloned()
+    }
+
+    pub fn transceiver_post_count(&self) -> usize {
+        self.fake.transceiver_posts.lock().unwrap().len()
+    }
+
+    pub fn builder(&self) -> afv::SessionBuilder {
         afv::Session::builder()
             .api_url(&self.api_url)
             .credentials(USERNAME, PASSWORD)
@@ -186,7 +210,11 @@ async fn transceivers(
         return StatusCode::UNAUTHORIZED;
     }
     fake.transceiver_posts.lock().unwrap().push(body);
-    StatusCode::OK
+    let delay = fake.transceiver_delay_ms.load(SeqCst);
+    if delay > 0 {
+        tokio::time::sleep(Duration::from_millis(delay)).await;
+    }
+    if fake.fail_transceivers.load(SeqCst) { StatusCode::INTERNAL_SERVER_ERROR } else { StatusCode::OK }
 }
 
 async fn cross_couple(
@@ -250,6 +278,13 @@ async fn voice_loop(fake: Arc<Fake>, udp: Arc<UdpSocket>) {
                     fake.answer_heartbeats.load(SeqCst).then(|| channel.seal(&HeartbeatAck).unwrap())
                 }
                 Message::AudioTx(audio) => {
+                    if fake.echo.load(SeqCst) {
+                        let mut buffer = fake.echo_buffer.lock().unwrap();
+                        buffer.push(audio.clone());
+                        if audio.last_packet {
+                            tokio::spawn(echo(fake.clone(), udp.clone(), from, std::mem::take(&mut *buffer)));
+                        }
+                    }
                     fake.audio.lock().unwrap().push(audio);
                     None
                 }
@@ -259,5 +294,29 @@ async fn voice_loop(fake: Arc<Fake>, udp: Arc<UdpSocket>) {
         if let Some(reply) = reply {
             let _ = udp.send_to(&reply, from).await;
         }
+    }
+}
+
+/// Replays a transmission in real time as received audio from `ECHO`, on the frequencies of the
+/// transceivers it was sent on.
+async fn echo(fake: Arc<Fake>, udp: Arc<UdpSocket>, to: SocketAddr, packets: Vec<AudioTx>) {
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let transceivers = fake.transceiver_posts.lock().unwrap().last().cloned().unwrap_or_default();
+    let mut tick = tokio::time::interval(Duration::from_millis(20));
+    for packet in packets {
+        tick.tick().await;
+        let audio = AudioRx {
+            callsign: "ECHO".into(),
+            sequence: packet.sequence,
+            audio: packet.audio,
+            last_packet: packet.last_packet,
+            transceivers: transceivers
+                .iter()
+                .filter(|t| packet.transceivers.contains(&t.id))
+                .map(|t| RxTransceiver { id: t.id, frequency: t.frequency, distance_ratio: 1.0 })
+                .collect(),
+        };
+        let Some(datagram) = fake.channel.lock().unwrap().as_mut().map(|c| c.seal(&audio).unwrap()) else { return };
+        let _ = udp.send_to(&datagram, to).await;
     }
 }

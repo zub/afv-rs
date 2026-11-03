@@ -147,6 +147,10 @@ impl Radio {
         self.transmitting = transmitting;
     }
 
+    pub fn transmitting(&self) -> bool {
+        self.transmitting
+    }
+
     /// Number of streams received in the last processed frame.
     pub fn receiving(&self) -> u32 {
         self.rx_count

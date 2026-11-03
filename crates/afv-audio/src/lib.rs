@@ -13,6 +13,7 @@
 
 pub mod bus;
 pub mod codec;
+pub mod convert;
 pub mod dsp;
 pub mod effects;
 pub mod jitter;
@@ -26,6 +27,7 @@ pub mod wav;
 
 pub use bus::{Bus, RadioId};
 pub use codec::OpusError;
+pub use convert::{CaptureConverter, ConvertError, RenderConverter};
 pub use dsp::{Carrier, Hardware};
 pub use effects::{EffectSamples, SamplePlayer, Samples};
 pub use radio::{Output, Pan, Radio, RadioSettings, RxChange, Signal};

@@ -18,13 +18,13 @@ Rust implementation of an Audio for VATSIM client. Wire-compatible with the AFV 
 ```
 crates/
   afv-proto   pure, no I/O: CryptoDTO framing, AEAD, replay window, voice DTOs,
-              REST request/response types (serde). Deps: chacha20poly1305, rmp, serde.
+              REST request/response types (serde). Deps: chacha20poly1305, serde.
   afv-audio   pure DSP, no devices, no network: Opus codec wrapper, jitter buffer,
-              radio simulation (biquads, compressors, effects mixer), AGC, mic chain.
+              radio simulation (biquads, compressors, effects mixer), AGC, rate conversion
+              (rubato). Example: render_double_tx.
   afv         the client: REST + UDP session (tokio, reqwest/rustls), radio model,
-              transceiver sync, PTT gating, audio engine glue, events.
-              feature "cpal": device I/O backend.
-examples/     pilot CLI, ATC CLI, fake voice server for local testing.
+              transceiver sync, PTT gating, audio engine, real-time bridge, events.
+              feature "cpal": device I/O backend. Examples: pilot, fake_server (with echo).
 ```
 
 `afv-proto` and `afv-audio` have no async runtime dependency and are testable in isolation.
@@ -36,80 +36,83 @@ concept — a **radio** — and pilots/ATC are just different configurations:
 
 ```rust
 pub struct RadioConfig {
-    pub frequency: Frequency,        // newtype over u32 Hz, parse/display "122.800"
-    pub sites: Sites,                // Sites::Own (client position) | Sites::Fixed(Vec<Site>)
+    pub frequency: Frequency,        // u32 Hz; parses and displays "122.800"
+    pub sites: Sites,                // Own (client position) | Fixed(Vec<Site>), e.g. from_station(..)
     pub rx: bool,
     pub tx: bool,
-    pub coupling: Coupling,          // None | Sites (xc, own group) | Across (group 0)
-    pub output: Output,              // which output bus: Headset/Speaker, Left/Right/Both
+    pub coupling: Coupling,          // None | Sites (own group) | Across (group 0)
+    pub output: Output,              // bus: Headset | Speaker, pan: Both | Left | Right
     pub gain: f32,
     pub hardware: Hardware,          // Schmid ED-137B | Rockwell Collins 2100 | Garex 220
     pub effects: bool,
+    pub hf_squelch: bool,
 }
 ```
 
-The client owns transceiver ID assignment, building the transceiver and cross-couple POSTs,
-periodic refresh, and PTT gating — callers never see transceiver IDs.
+The client owns transceiver ID assignment (dense, in radio then site order), building the
+transceiver and cross-couple POSTs, and PTT gating — callers never see transceiver IDs. A radio
+with `tx` but not `rx` still gets transceivers (afv-native omitted them but kept transmitting on
+stale IDs). Position-only changes are stored and go out with the periodic refresh.
 
-## Public API sketch
+## Public API
 
 ```rust
 let client = afv::Client::builder()
     .credentials(cid, password)
     .callsign("SAS123")
     .client_name("myclient/1.0")
-    .build()?;
+    .effects(EffectSamples::load_dir(dir)?)       // optional
+    .connect().await?;                            // auth + voice session; auto-reconnects
 
-let session = client.connect().await?;          // auth + voice session; auto-reconnects
+client.set_position(Position { lat_deg, lon_deg, height_msl_m, height_agl_m });
+let com1 = client.add_radio(RadioConfig { tx: true, ..RadioConfig::pilot("122.800".parse()?) });
+client.update_radio(com1, |r| r.frequency = "121.500".parse().unwrap());
 
-session.set_position(Position { lat, lon, alt_msl_m, alt_agl_m });
-let com1 = session.add_radio(RadioConfig::pilot(Frequency::mhz(122.800)));
-let com2 = session.add_radio(RadioConfig::pilot(Frequency::mhz(121.500)));
-session.radio(com1).set_tx(true);
+client.set_ptt(true);              // opens once the server has acknowledged the transceivers
 
-session.set_ptt(true);                           // opens once transceivers are synced
-
-let mut events = session.events();               // impl Stream<Item = Event>
-while let Some(ev) = events.next().await {
-    match ev {
+let mut events = client.events();  // Events::next().await
+while let Some(event) = events.next().await {
+    match event {
         Event::RxStarted { radio, callsign } => ...,
         Event::PttOpened => ...,
-        Event::ConnectionDegraded => ...,
+        Event::Session(SessionState::Degraded) => ...,
         ...
     }
 }
 
-// ATC: station data
-let sites = session.station_transceivers("ENGM_TWR").await?;   // plain async fns, not callbacks
-let vccs  = session.vccs("ENGM_TWR").await?;
-
-session.disconnect().await?;
+let sites = client.station_transceivers("ENGM_TWR").await?;   // plain async fns
+client.disconnect().await;
 ```
 
-Changes made via `session.radio(id)` are applied to local state at once and pushed to the
-server, debounced, by a background task.
+Changes are applied to local audio at once; a background task sends them to the server,
+debounced by 20 ms. PTT pressed while the server's view differs (or an update is in flight)
+waits for the update; while transmitting, audio goes to the last acknowledged transceiver IDs.
+
+`Session` remains public for applications that only want the network side.
 
 ### Audio
 
 The audio engine is decoupled from devices:
 
 ```rust
-let audio = session.audio();                       // cheap handle, Send + Sync
-audio.capture(&mic_samples, sample_rate);          // from any mic source, any buffer size
-audio.render(Bus::Headset, &mut out, sample_rate, channels);  // pull for an output
+let audio = client.audio();                                    // Clone, Send + Sync
+audio.capture(&mic_samples, sample_rate, channels)?;           // any buffer size or rate
+audio.render(OutputBus::Headset, &mut out, sample_rate, channels)?;
 ```
 
-Internally this reframes to 48 kHz / 960-sample frames (resampling when needed). With the `cpal`
-feature, `afv::devices::attach(&session, DeviceConfig { ... })` does the wiring and reports
-device errors as events.
+These lock the engine and decode, mix and encode inline, so they belong on an ordinary thread.
+`afv::realtime::bridge` provides that thread for any audio API: real-time callbacks get
+`Capture::push` / `Playback::fill` handles that only touch lock-free ring buffers (`rtrb`) and
+wake the worker. With the `cpal` feature, `afv::devices::attach(&client.audio(), DeviceConfig)`
+wires up actual devices on top of it and reports device errors as events.
 
 Threading:
 
-- Network task (tokio) → per-callsign packet queue (lock-free SPSC) → render callback, which
-  runs the jitter buffer, Opus decoding and radio simulation.
-- Capture callback → mic chain → Opus encode → SPSC → network task sends `AT`. The 20 ms
-  `SequenceCounter` ticks in the capture path, as the protocol requires.
-- Radio configuration reaches the audio thread through a lock-free snapshot (e.g. `arc-swap`).
+- Network task (tokio) → bounded queue of `AR` packets → worker, which runs the jitter buffers,
+  Opus decoding and radio simulation per output bus and fills the output rings.
+- Microphone ring → worker → resample to 48 kHz → 20 ms frames → Opus → `AT` sent directly
+  (non-blocking UDP). The `SequenceCounter` ticks per captured frame, as the protocol requires.
+- Radio configuration reaches the engine under a mutex that only the worker and API calls take.
 
 ## Things replaced, not ported
 
@@ -117,8 +120,8 @@ Threading:
 |---|---|
 | Speex jitter buffer | Own jitter buffer keyed on `SequenceCounter` (20 ms ticks), with the same flush-after-500 ms and PLC behaviour |
 | Speex preprocessor (mic) | Pluggable; default candidates: `nnnoiseless` (pure Rust) and a simple AGC |
-| POCO, libcurl, OpenSSL, nlohmann, msgpack-c | tokio, reqwest+rustls, RustCrypto, serde_json, rmp |
-| ChainedCallback / EventBus | `Stream` of `Event` |
+| POCO, libcurl, OpenSSL, nlohmann, msgpack-c | tokio, reqwest+rustls, RustCrypto, serde_json, own msgpack subset |
+| ChainedCallback / EventBus | `Events` stream of `Event` |
 | Effect WAVs loaded from a path | Caller supplies them (`EffectSamples`); white noise can be synthesised |
 
 The small DSP blocks (biquads, ChunkWare SimpleComp/SimpleLimit, sndfilter compressor) are ported

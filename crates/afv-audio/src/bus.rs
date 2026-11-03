@@ -27,6 +27,8 @@ struct Talker {
     carrier: Carrier,
     frame: Box<Frame>,
     has_frame: bool,
+    /// Radios on which this talker was heard in the last rendered frame.
+    heard_on: Vec<RadioId>,
 }
 
 pub struct Bus {
@@ -62,6 +64,9 @@ impl Bus {
 
     pub fn remove_radio(&mut self, id: RadioId) {
         self.radios.retain(|(i, _)| *i != id);
+        for t in self.talkers.values_mut() {
+            t.heard_on.retain(|&r| r != id);
+        }
     }
 
     pub fn radio(&self, id: RadioId) -> Option<&Radio> {
@@ -110,12 +115,23 @@ impl Bus {
                 stream.agc_mut().set_target_db(self.agc_target_db);
                 stream.agc_mut().set_enabled(self.agc_enabled);
                 let carrier = Carrier::for_callsign(callsign);
-                let talker = Talker { stream, carrier, frame: Box::new([0.0; FRAME_SAMPLES]), has_frame: false };
+                let talker = Talker {
+                    stream,
+                    carrier,
+                    frame: Box::new([0.0; FRAME_SAMPLES]),
+                    has_frame: false,
+                    heard_on: Vec::with_capacity(4),
+                };
                 self.talkers.entry(callsign.to_owned()).or_insert(talker)
             }
         };
         talker.stream.push(sequence, opus, last, transceivers, now);
         Ok(())
+    }
+
+    /// Whether any radio on this bus is tuned to one of `transceivers`' frequencies.
+    pub fn hears(&self, transceivers: &[RxTransceiver]) -> bool {
+        self.radios.iter().any(|(_, r)| transceivers.iter().any(|t| t.frequency == r.settings().frequency))
     }
 
     /// Forgets talkers that have been silent longer than `timeout`.
@@ -124,21 +140,23 @@ impl Bus {
             .retain(|_, t| t.stream.last_packet_at().is_some_and(|at| now.saturating_duration_since(at) <= timeout));
     }
 
-    /// Renders one stereo frame. `on_change` is told when reception starts or ends on a radio.
-    pub fn render_stereo(&mut self, left: &mut Frame, right: &mut Frame, on_change: impl FnMut(RadioId, RxChange)) {
-        self.render(left, Some(right), on_change);
+    /// Renders one stereo frame. `on_rx` is told when a talker starts or stops being heard on
+    /// a radio.
+    pub fn render_stereo(&mut self, left: &mut Frame, right: &mut Frame, on_rx: impl FnMut(RadioId, &str, RxChange)) {
+        self.render(left, Some(right), on_rx);
     }
 
     /// Renders one mono frame, ignoring radio panning.
-    pub fn render_mono(&mut self, out: &mut Frame, on_change: impl FnMut(RadioId, RxChange)) {
-        self.render(out, None, on_change);
+    pub fn render_mono(&mut self, out: &mut Frame, on_rx: impl FnMut(RadioId, &str, RxChange)) {
+        self.render(out, None, on_rx);
     }
 
-    fn render(
+    /// Renders one frame, mono if `right` is `None`.
+    pub fn render(
         &mut self,
         left: &mut Frame,
         mut right: Option<&mut Frame>,
-        mut on_change: impl FnMut(RadioId, RxChange),
+        mut on_rx: impl FnMut(RadioId, &str, RxChange),
     ) {
         left.fill(0.0);
         if let Some(r) = right.as_deref_mut() {
@@ -148,7 +166,7 @@ impl Bus {
             t.has_frame = t.stream.is_active() && t.stream.next_frame(&mut t.frame);
         }
         let talkers = &self.talkers;
-        for (id, radio) in &mut self.radios {
+        for (_, radio) in &mut self.radios {
             let signals = talkers.values().filter(|t| t.has_frame).map(|t| Signal {
                 audio: &t.frame,
                 transceivers: t.stream.transceivers(),
@@ -158,11 +176,34 @@ impl Bus {
                 Some(r) => Output::Stereo { left: &mut *left, right: r },
                 None => Output::Mono(&mut *left),
             };
-            if let Some(change) = radio.process(signals, &self.effects, output) {
-                on_change(*id, change);
+            radio.process(signals, &self.effects, output);
+        }
+        self.report_rx(&mut on_rx);
+        self.mix_sounds(left, right);
+    }
+
+    /// Compares who is heard on which radio with the previous frame. A talker is heard on a radio
+    /// while it is producing audio on the radio's frequency and the radio is not transmitting.
+    fn report_rx(&mut self, on_rx: &mut impl FnMut(RadioId, &str, RxChange)) {
+        for (callsign, t) in &mut self.talkers {
+            for (id, radio) in &self.radios {
+                let frequency = radio.settings().frequency;
+                let heard = t.has_frame
+                    && !radio.transmitting()
+                    && t.stream.transceivers().iter().any(|x| x.frequency == frequency);
+                match (heard, t.heard_on.iter().position(|r| r == id)) {
+                    (true, None) => {
+                        t.heard_on.push(*id);
+                        on_rx(*id, callsign, RxChange::Started);
+                    }
+                    (false, Some(i)) => {
+                        t.heard_on.swap_remove(i);
+                        on_rx(*id, callsign, RxChange::Ended);
+                    }
+                    _ => {}
+                }
             }
         }
-        self.mix_sounds(left, right);
     }
 
     fn mix_sounds(&mut self, left: &mut Frame, right: Option<&mut Frame>) {

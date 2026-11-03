@@ -214,18 +214,54 @@ fn bus_plays_a_received_transmission_end_to_end() {
         if let Some(p) = tx.process(&sine(i, 440.0, 0.3)).unwrap() {
             bus.push("SAS123", p.sequence, p.opus, p.last_packet, &rx(FREQ, 1.0), now).unwrap();
         }
-        bus.render_stereo(&mut l, &mut r, |id, c| changes.push((i, id, c)));
+        bus.render_stereo(&mut l, &mut r, |id, callsign, c| changes.push((i, id, callsign.to_owned(), c)));
         if rms(&l) > 0.05 {
             loud_frames += 1;
         }
     }
     assert!(loud_frames >= 25, "heard {loud_frames} frames");
     assert_eq!(changes.len(), 2, "{changes:?}");
-    assert_eq!((changes[0].1, changes[0].2), (1, RxChange::Started));
-    assert_eq!((changes[1].1, changes[1].2), (1, RxChange::Ended));
+    assert_eq!((changes[0].1, &*changes[0].2, changes[0].3), (1, "SAS123", RxChange::Started));
+    assert_eq!((changes[1].1, &*changes[1].2, changes[1].3), (1, "SAS123", RxChange::Ended));
     assert_eq!(bus.radio(2).unwrap().receiving(), 0);
 
     bus.purge_idle(start + Duration::from_secs(120), afv_audio::bus::STREAM_IDLE_TIMEOUT);
+}
+
+#[test]
+fn bus_reports_each_talker_per_radio() {
+    let mut bus = Bus::new(EffectSamples::default());
+    bus.set_radio(1, clean(FREQ));
+    bus.set_radio(2, clean(FREQ));
+    bus.set_radio(3, clean(121_500_000));
+    assert!(bus.hears(&rx(FREQ, 1.0)) && !bus.hears(&rx(118_000_000, 1.0)));
+    let mut txs = [Transmitter::new().unwrap(), Transmitter::new().unwrap()];
+    txs.iter_mut().for_each(|t| t.set_ptt(true));
+    let start = Instant::now();
+    let mut events = Vec::new();
+    let (mut l, mut r) = ([0.0; FRAME_SAMPLES], [0.0; FRAME_SAMPLES]);
+    for i in 0..60 {
+        let now = start + Duration::from_millis(20 * i as u64);
+        let [a, b] = &mut txs;
+        for (tx, callsign, freq) in [(a, "SAS123", FREQ), (b, "NAX45F", 121_500_000)] {
+            if i == 30 && callsign == "NAX45F" {
+                tx.set_ptt(false);
+            }
+            if let Some(p) = tx.process(&sine(i, 440.0, 0.3)).unwrap() {
+                bus.push(callsign, p.sequence, p.opus, p.last_packet, &rx(freq, 1.0), now).unwrap();
+            }
+        }
+        if i == 40 {
+            // Transmitting on radio 1 stops reception there.
+            bus.set_transmitting(1, true);
+        }
+        bus.render_stereo(&mut l, &mut r, |id, callsign, c| events.push((id, callsign.to_owned(), c)));
+    }
+    let started: Vec<_> = events.iter().filter(|e| e.2 == RxChange::Started).map(|e| (e.0, &*e.1)).collect();
+    let ended: Vec<_> = events.iter().filter(|e| e.2 == RxChange::Ended).map(|e| (e.0, &*e.1)).collect();
+    assert_eq!(started.len(), 3, "{events:?}");
+    assert!(started.contains(&(1, "SAS123")) && started.contains(&(2, "SAS123")) && started.contains(&(3, "NAX45F")));
+    assert_eq!(ended, [(3, "NAX45F"), (1, "SAS123")], "{events:?}");
 }
 
 #[test]
@@ -233,8 +269,8 @@ fn bus_mono_ignores_pan_and_plays_sounds() {
     let mut bus = Bus::new(EffectSamples::default());
     bus.play_sound(vec![0.5; 100].into(), 2.0);
     let mut out = [0.0; FRAME_SAMPLES];
-    bus.render_mono(&mut out, |_, _| {});
+    bus.render_mono(&mut out, |_, _, _| {});
     assert_eq!((out[0], out[99], out[100]), (1.0, 1.0, 0.0));
-    bus.render_mono(&mut out, |_, _| {});
+    bus.render_mono(&mut out, |_, _, _| {});
     assert_eq!(out[0], 0.0);
 }

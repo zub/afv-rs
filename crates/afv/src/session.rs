@@ -54,7 +54,7 @@ pub enum LinkLoss {
 
 /// Configures and opens a [`Session`].
 #[derive(Debug, Clone)]
-pub struct ClientBuilder {
+pub struct SessionBuilder {
     api_url: String,
     credentials: Option<Credentials>,
     callsign: Option<String>,
@@ -62,7 +62,7 @@ pub struct ClientBuilder {
     timing: Timing,
 }
 
-impl Default for ClientBuilder {
+impl Default for SessionBuilder {
     fn default() -> Self {
         Self {
             api_url: afv_proto::consts::DEFAULT_API_URL.into(),
@@ -74,7 +74,7 @@ impl Default for ClientBuilder {
     }
 }
 
-impl ClientBuilder {
+impl SessionBuilder {
     pub fn api_url(mut self, url: impl Into<String>) -> Self {
         self.api_url = url.into();
         self
@@ -109,8 +109,8 @@ impl ClientBuilder {
     pub async fn connect(self) -> Result<Session> {
         let config = Config {
             api_url: self.api_url,
-            credentials: self.credentials.expect("ClientBuilder::credentials must be set"),
-            callsign: self.callsign.expect("ClientBuilder::callsign must be set"),
+            credentials: self.credentials.expect("SessionBuilder::credentials must be set"),
+            callsign: self.callsign.expect("SessionBuilder::callsign must be set"),
             client_name: self.client_name,
             timing: self.timing,
         };
@@ -118,7 +118,8 @@ impl ClientBuilder {
     }
 }
 
-/// An open AFV session.
+/// An open AFV session: the network side only. Most applications want [`crate::Client`], which
+/// adds radios, PTT and audio on top.
 ///
 /// Dropping it stops the background task, which then releases the callsign on the server
 /// if the runtime is still running. Use [`Session::disconnect`] to wait for that.
@@ -128,7 +129,7 @@ pub struct Session {
     task: JoinHandle<()>,
 }
 
-struct Shared {
+pub(crate) struct Shared {
     api: Api,
     link: Mutex<Option<Link>>,
     transceivers: Mutex<Vec<Transceiver>>,
@@ -155,8 +156,8 @@ enum LinkEnd {
 }
 
 impl Session {
-    pub fn builder() -> ClientBuilder {
-        ClientBuilder::default()
+    pub fn builder() -> SessionBuilder {
+        SessionBuilder::default()
     }
 
     async fn connect(config: Config) -> Result<Self> {
@@ -180,6 +181,10 @@ impl Session {
         &self.shared.api.config().callsign
     }
 
+    pub(crate) fn shared(&self) -> &Arc<Shared> {
+        &self.shared
+    }
+
     pub fn state(&self) -> SessionState {
         self.shared.state.borrow().clone()
     }
@@ -200,26 +205,18 @@ impl Session {
     ///
     /// Does not block; fails with [`Error::NotConnected`] while reconnecting.
     pub fn send_audio(&self, sequence: u32, opus: &[u8], last_packet: bool, transceivers: &[u16]) -> Result<()> {
-        self.shared.send(&AudioTx {
-            callsign: self.callsign().to_owned(),
-            sequence,
-            audio: opus.to_vec(),
-            last_packet,
-            transceivers: transceivers.to_vec(),
-        })
+        self.shared.send_audio(sequence, opus, last_packet, transceivers)
     }
 
     /// Replaces the transceiver set and sends it to the server. The set is re-sent periodically
     /// and after every reconnect. Returns once the server has accepted it.
     pub async fn set_transceivers(&self, transceivers: Vec<Transceiver>) -> Result<()> {
-        *self.shared.transceivers.lock().unwrap() = transceivers.clone();
-        self.shared.api.post_transceivers(&transceivers).await
+        self.shared.set_transceivers(transceivers).await
     }
 
     /// Replaces the cross-couple groups (ATC). Re-sent with every transceiver refresh.
     pub async fn set_cross_couple_groups(&self, groups: Vec<CrossCoupleGroup>) -> Result<()> {
-        *self.shared.cross_couple_groups.lock().unwrap() = Some(groups.clone());
-        self.shared.api.post_cross_couple_groups(&groups).await
+        self.shared.set_cross_couple_groups(groups).await
     }
 
     /// Looks up a station by name; `None` if it does not exist.
@@ -252,6 +249,43 @@ impl Session {
 impl Shared {
     fn timing(&self) -> &Timing {
         &self.api.config().timing
+    }
+
+    pub(crate) fn callsign(&self) -> &str {
+        &self.api.config().callsign
+    }
+
+    pub(crate) fn watch_state(&self) -> watch::Receiver<SessionState> {
+        self.state.subscribe()
+    }
+
+    pub(crate) fn take_incoming_audio(&self) -> Option<mpsc::Receiver<AudioRx>> {
+        self.incoming_audio_rx.lock().unwrap().take()
+    }
+
+    pub(crate) fn send_audio(&self, sequence: u32, opus: &[u8], last_packet: bool, transceivers: &[u16]) -> Result<()> {
+        self.send(&AudioTx {
+            callsign: self.callsign().to_owned(),
+            sequence,
+            audio: opus.to_vec(),
+            last_packet,
+            transceivers: transceivers.to_vec(),
+        })
+    }
+
+    pub(crate) async fn set_transceivers(&self, transceivers: Vec<Transceiver>) -> Result<()> {
+        *self.transceivers.lock().unwrap() = transceivers.clone();
+        self.api.post_transceivers(&transceivers).await
+    }
+
+    /// Replaces the stored transceivers without posting them; they go out with the next refresh.
+    pub(crate) fn store_transceivers(&self, transceivers: Vec<Transceiver>) {
+        *self.transceivers.lock().unwrap() = transceivers;
+    }
+
+    pub(crate) async fn set_cross_couple_groups(&self, groups: Vec<CrossCoupleGroup>) -> Result<()> {
+        *self.cross_couple_groups.lock().unwrap() = Some(groups.clone());
+        self.api.post_cross_couple_groups(&groups).await
     }
 
     fn set_state(&self, state: SessionState) {
@@ -468,8 +502,9 @@ impl Shared {
                 }
             }
             Message::AudioRx(audio) => {
+                // Full when nothing is playing audio, e.g. a client without output devices.
                 if let Err(mpsc::error::TrySendError::Full(_)) = self.incoming_audio.try_send(audio) {
-                    tracing::warn!("incoming audio queue full; dropping frame");
+                    tracing::trace!("incoming audio queue full; dropping frame");
                 }
             }
             other => tracing::debug!(?other, "ignored message"),

@@ -35,6 +35,8 @@ pub enum Error {
     Protocol(#[from] afv_proto::Error),
     #[error("not connected")]
     NotConnected,
+    #[error("Opus codec: {0}")]
+    Codec(#[from] afv_audio::OpusError),
 }
 
 impl Error {
