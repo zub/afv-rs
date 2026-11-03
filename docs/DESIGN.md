@@ -9,8 +9,9 @@ Rust implementation of an Audio for VATSIM client. Wire-compatible with the AFV 
 - One model for pilot, ATC and ATIS clients instead of three separate client classes.
 - Audio devices are optional: the library works on sample buffers; a `cpal` backend is a feature.
 - Real-time safe audio path (no locks contended with the network, no allocation in callbacks).
-- Faithful radio simulation (crackle, noise, hardware EQ, squelch click), with simultaneous VHF
-  transmissions modelled as beating AM carriers instead of afv-native's fixed blocking tone, and
+- Realistic radio simulation (crackle, noise, radio sets, squelch click) in the order of a
+  real receiver (see [Receiver chain](#receiver-chain)), with simultaneous VHF transmissions
+  modelled as beating AM carriers instead of afv-native's fixed blocking tone, and
   HF propagation that is not in afv-native at all: single-sideband mistuning, Watterson multipath
   fading with slow log-normal fading on top, and a noise floor, static crashes and ionospheric
   sounders heard through a sideband filter, adjustable from clean to poor conditions
@@ -47,7 +48,8 @@ pub struct RadioConfig {
     pub coupling: Coupling,          // None | Sites (own group) | Across (group 0)
     pub output: Output,              // bus: Headset | Speaker, pan: Both | Left | Right
     pub gain: f32,
-    pub hardware: Hardware,          // Schmid ED-137B | Rockwell Collins 2100 | Garex 220
+    pub vhf_hardware: VhfHardware,   // Schmid ED-137B | Rockwell Collins 2100 | Garex 220
+    pub hf_hardware: HfHardware,     // Collins HFS-900D
     pub effects: bool,
     pub hf_squelch: bool,
 }
@@ -128,9 +130,36 @@ Threading:
 | ChainedCallback / EventBus | `Events` stream of `Event` |
 | Effect WAVs loaded from a path | Caller supplies them (`EffectSamples`); white noise can be synthesised |
 
-The small DSP blocks (biquads, ChunkWare SimpleComp/SimpleLimit, sndfilter compressor) are ported
-directly. They are MIT (sndfilter, ChunkWare) and BSD-3 (afv-native); keep their notices in
+The sndfilter compressor and afv-native's stream AGC are ported, and the VHF sets' audio responses
+are afv-native's EQ curves; nothing else in the audio aims to match afv-native. They are MIT (sndfilter) and BSD-3 (afv-native); keep their notices in
 `THIRD_PARTY.md`.
+
+## Receiver chain
+
+Each radio hears everything through a **radio set** (`RadioSet`): a VHF set on VHF frequencies
+(`vhf_hardware`), an HF set on HF (`hf_hardware`), so a VHF set never colours HF. Every set is the
+same four stages, configured by a spec in `dsp/hardware.rs`:
+
+| Stage | VHF sets (Schmid ED-137B, Rockwell Collins 2100, Garex 220) | HF set (Collins HFS-900D) |
+|---|---|---|
+| Selectivity | 300–3000 Hz, 4th-order Butterworth skirts | Collins' published mask: 6th-order Butterworth at 300 Hz, 10th-order Chebyshev ending at 2500 Hz |
+| Gain control | sndfilter compressor | hang AGC: 3 ms attack, 0.25 s hang, 20 dB/s, 8 dB reserve |
+| Audio response | the preset's EQ curve | flat |
+| Output | look-ahead peak limiter | look-ahead peak limiter |
+
+Every audio response is scaled so that the sets play speech equally loud, weighed with the
+long-term average speech spectrum and A-weighting. The limiter keeps static crashes below full
+scale without clipping.
+
+```
+VHF: voices (beating AM carriers when several) ───────────────────────── VHF set ─┐
+                                                                                    effect recordings ─ volume
+HF:  voices (speech processor, mistuning, fading) + noise, static, sounders ─ HF set ─┘
+```
+
+On HF the compressor moves to each transmitting station as its speech processor, ahead of
+propagation, so it shapes the voice without pumping the noise (see [HF.md](HF.md)).
+`RadioSettings::gain` scales the finished output, so halving it is exactly 6 dB.
 
 ## Milestones
 

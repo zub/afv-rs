@@ -1,13 +1,16 @@
-//! Receive-side simulation of one radio. Port of afv-native's `ATCRadioSimulation::_process_radio`
-//! (the pilot `RadioSimulation` behaves the same for a single matching transceiver), except that
-//! simultaneous transmissions on VHF are rendered by [`AmChannel`] instead of a fixed tone.
+//! Receive-side simulation of one radio.
+//!
+//! Everything it hears goes through a radio set ([`RadioSet`]): a VHF set on VHF frequencies, an
+//! HF set on HF, each with its own band filter, gain control and audio response. The volume comes
+//! last. On VHF, simultaneous transmissions are combined as beating AM carriers ([`AmChannel`]);
+//! on HF, where the set also hears the atmosphere, they simply add up.
 
 use afv_proto::consts::HF_UPPER_LIMIT_HZ;
 use afv_proto::voice::RxTransceiver;
 
-use crate::dsp::{AmChannel, Atmospherics, Carrier, Compressor, Hardware, HardwareFilter, HfConditions, SsbFilter};
+use crate::dsp::{AmChannel, Atmospherics, Carrier, HfConditions, HfHardware, RadioSet, VhfHardware};
 use crate::effects::{EffectSamples, SamplePlayer};
-use crate::{FRAME_SAMPLES, Frame, SAMPLE_RATE};
+use crate::{FRAME_SAMPLES, Frame};
 
 const CLICK_GAIN: f32 = 1.3;
 const AC_BUS_GAIN: f32 = 0.005;
@@ -27,9 +30,6 @@ const CRACKLE_VOICE_DUCKING: f64 = 3.7;
 /// Weakest carrier for the AM model, so that even a signal at the edge of range takes part.
 const CARRIER_LEVEL_FLOOR: f32 = 0.01;
 
-/// afv-native plays HF voice at this gain; the HF background levels are set relative to it.
-pub(crate) const HF_VOICE_GAIN: f32 = 0.20;
-
 /// Which side(s) of a stereo output a radio plays on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
 pub enum Pan {
@@ -43,14 +43,17 @@ pub enum Pan {
 pub struct RadioSettings {
     /// Hz; 0 receives nothing.
     pub frequency: u32,
-    /// Output gain, linear.
+    /// Volume, linear, applied after all of the simulation.
     pub gain: f32,
     /// Simulate radio effects; `false` plays voice clean.
     pub effects: bool,
     /// HF radios have no squelch, so their background (noise, static, sounders) plays all the
     /// time; this silences it, and adds the squelch click at the end of a transmission.
     pub hf_squelch: bool,
-    pub hardware: Hardware,
+    /// The set heard on VHF frequencies…
+    pub vhf_hardware: VhfHardware,
+    /// …and the one heard on HF.
+    pub hf_hardware: HfHardware,
     pub muted: bool,
     pub pan: Pan,
 }
@@ -62,7 +65,8 @@ impl Default for RadioSettings {
             gain: 1.0,
             effects: true,
             hf_squelch: false,
-            hardware: Hardware::default(),
+            vhf_hardware: VhfHardware::default(),
+            hf_hardware: HfHardware::default(),
             muted: false,
             pan: Pan::Both,
         }
@@ -110,9 +114,8 @@ pub enum Output<'a> {
 pub struct Radio {
     settings: RadioSettings,
     transmitting: bool,
-    filter: HardwareFilter,
-    filter_needs_reset: bool,
-    compressor: Compressor,
+    /// The set for the current frequency's band.
+    set: RadioSet,
     click: Option<SamplePlayer>,
     crackle: Option<SamplePlayer>,
     vhf_noise: Option<SamplePlayer>,
@@ -123,11 +126,31 @@ pub struct Radio {
     /// HF noise floor, static and sounders (distinct from `crackle`, afv-native's weak-signal
     /// VHF recording).
     atmospherics: Atmospherics,
-    /// The HF receiver's sideband filter, applied to voice and static alike.
-    ssb: SsbFilter,
     rx_count: u32,
     channel: Box<Frame>,
     fetch: Box<Frame>,
+}
+
+fn is_hf(frequency: u32) -> bool {
+    frequency < HF_UPPER_LIMIT_HZ
+}
+
+/// Which set a radio's settings call for.
+#[derive(PartialEq)]
+enum SetChoice {
+    Vhf(VhfHardware),
+    Hf(HfHardware),
+}
+
+fn set_choice(settings: &RadioSettings) -> SetChoice {
+    if is_hf(settings.frequency) { SetChoice::Hf(settings.hf_hardware) } else { SetChoice::Vhf(settings.vhf_hardware) }
+}
+
+fn radio_set(settings: &RadioSettings) -> RadioSet {
+    match set_choice(settings) {
+        SetChoice::Vhf(h) => RadioSet::vhf(h),
+        SetChoice::Hf(h) => RadioSet::hf(h),
+    }
 }
 
 fn mix(dst: &mut Frame, src: &Frame, gain: f32) {
@@ -140,11 +163,9 @@ impl Radio {
     pub fn new(settings: RadioSettings) -> Self {
         let seed = settings.frequency as u64;
         Self {
-            filter: HardwareFilter::new(settings.hardware),
+            set: radio_set(&settings),
             settings,
             transmitting: false,
-            filter_needs_reset: false,
-            compressor: Compressor::default_for_rate(SAMPLE_RATE),
             click: None,
             crackle: None,
             vhf_noise: None,
@@ -153,7 +174,6 @@ impl Radio {
             am: AmChannel::new(),
             hf_conditions: HfConditions::default(),
             atmospherics: Atmospherics::new(seed),
-            ssb: SsbFilter::default(),
             rx_count: 0,
             channel: Box::new([0.0; FRAME_SAMPLES]),
             fetch: Box::new([0.0; FRAME_SAMPLES]),
@@ -164,16 +184,17 @@ impl Radio {
         &self.settings
     }
 
-    /// Applies new settings. A frequency change stops all effects except a pending click.
-    /// A hardware change allocates a new filter.
+    /// Applies new settings. A frequency change stops all effects except a pending click; a
+    /// change of band or of the set for it switches to that set.
     pub fn set_settings(&mut self, settings: RadioSettings) {
         if settings.frequency != self.settings.frequency {
             self.reset_effects(true);
         }
-        if settings.hardware != self.settings.hardware {
-            self.filter = HardwareFilter::new(settings.hardware);
-        }
+        let (old, new) = (set_choice(&self.settings), set_choice(&settings));
         self.settings = settings;
+        if old != new {
+            self.set = radio_set(&self.settings);
+        }
     }
 
     /// HF propagation; the radio adds the static from it while receiving on HF.
@@ -202,11 +223,10 @@ impl Radio {
         }
         self.crackle = None;
         self.atmospherics.reset();
-        self.ssb.reset();
+        self.set.reset();
         self.vhf_noise = None;
         self.hf_noise = None;
         self.ac_bus = None;
-        self.filter_needs_reset = true;
     }
 
     fn mix_effect(player: &mut Option<SamplePlayer>, gain: f32, channel: &mut Frame, fetch: &mut Frame) {
@@ -239,7 +259,7 @@ impl Radio {
         }
         self.channel.fill(0.0);
 
-        let hf = frequency < HF_UPPER_LIMIT_HZ;
+        let hf = is_hf(frequency);
         let audible = !ignore && !muted;
         let (mut crackle_gain, mut hf_gain, mut vhf_gain, mut ac_gain) = (0f32, 0f32, 0f32, 0f32);
         let mut count = 0;
@@ -262,7 +282,6 @@ impl Radio {
                     hf_gain = if hf_squelch { 0.0 } else { HF_NOISE_GAIN };
                     vhf_gain = 0.0;
                     ac_gain = HF_AC_BUS_GAIN;
-                    voice_gain = HF_VOICE_GAIN;
                 } else {
                     hf_gain = 0.0;
                     vhf_gain = VHF_NOISE_GAIN;
@@ -272,7 +291,7 @@ impl Radio {
                 }
             }
             if audible {
-                mix(&mut self.channel, signal.audio, voice_gain * gain);
+                mix(&mut self.channel, signal.audio, voice_gain);
                 if !hf {
                     self.am.add(signal.audio, voice_gain, carrier_level(ratio), signal.carrier);
                 }
@@ -281,7 +300,6 @@ impl Radio {
         }
         if audible && !hf && count > 1 {
             self.am.detect(&mut self.channel);
-            self.channel.iter_mut().for_each(|x| *x *= gain);
         } else {
             self.am.idle();
         }
@@ -301,15 +319,14 @@ impl Radio {
             if fx_on {
                 if hf {
                     // What an SSB receiver hears: noise, static and sounders added to the signal,
-                    // all through the sideband filter, ahead of the rest of the audio chain.
+                    // all through the set's sideband filter.
                     if hf_gain > 0.0 {
                         self.fetch.fill(0.0);
                         self.atmospherics.add(&self.hf_conditions, &mut self.fetch);
-                        mix(&mut self.channel, &self.fetch, gain);
+                        mix(&mut self.channel, &self.fetch, 1.0);
                     }
-                    self.ssb.process(&mut self.channel[..]);
                 }
-                self.channel.iter_mut().for_each(|x| *x = x.clamp(-1.0, 1.0));
+                self.set.process(&mut self.channel[..]);
                 let start = |p: &mut Option<SamplePlayer>, samples: &Option<crate::effects::Samples>| {
                     if p.is_none() {
                         *p = samples.clone().map(|s| SamplePlayer::new(s, true));
@@ -319,15 +336,10 @@ impl Radio {
                 start(&mut self.hf_noise, &effects.hf_noise);
                 start(&mut self.crackle, &effects.crackle);
                 start(&mut self.ac_bus, &effects.ac_bus);
-                if std::mem::take(&mut self.filter_needs_reset) {
-                    self.filter.reset();
-                }
-                self.filter.process(&mut self.channel[..]);
-                self.compressor.process(&mut self.channel[..]);
-                Self::mix_effect(&mut self.crackle, crackle_gain * gain, &mut self.channel, &mut self.fetch);
-                Self::mix_effect(&mut self.hf_noise, hf_gain * gain, &mut self.channel, &mut self.fetch);
-                Self::mix_effect(&mut self.vhf_noise, vhf_gain * gain, &mut self.channel, &mut self.fetch);
-                Self::mix_effect(&mut self.ac_bus, ac_gain * gain, &mut self.channel, &mut self.fetch);
+                Self::mix_effect(&mut self.crackle, crackle_gain, &mut self.channel, &mut self.fetch);
+                Self::mix_effect(&mut self.hf_noise, hf_gain, &mut self.channel, &mut self.fetch);
+                Self::mix_effect(&mut self.vhf_noise, vhf_gain, &mut self.channel, &mut self.fetch);
+                Self::mix_effect(&mut self.ac_bus, ac_gain, &mut self.channel, &mut self.fetch);
             }
         } else {
             self.reset_effects(true);
@@ -340,17 +352,17 @@ impl Radio {
             change = Some(RxChange::Ended);
         }
         self.rx_count = count;
-        Self::mix_effect(&mut self.click, CLICK_GAIN * gain, &mut self.channel, &mut self.fetch);
+        Self::mix_effect(&mut self.click, CLICK_GAIN, &mut self.channel, &mut self.fetch);
 
         if !ignore && !muted {
             match output {
-                Output::Mono(out) => mix(out, &self.channel, 1.0),
+                Output::Mono(out) => mix(out, &self.channel, gain),
                 Output::Stereo { left, right } => {
                     if self.settings.pan != Pan::Right {
-                        mix(left, &self.channel, 1.0);
+                        mix(left, &self.channel, gain);
                     }
                     if self.settings.pan != Pan::Left {
-                        mix(right, &self.channel, 1.0);
+                        mix(right, &self.channel, gain);
                     }
                 }
             }

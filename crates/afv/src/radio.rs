@@ -6,7 +6,7 @@
 
 use afv_proto::api::{CrossCoupleGroup, StationTransceiver, Transceiver};
 
-pub use afv_audio::{Hardware, Pan};
+pub use afv_audio::{HfHardware, Pan, VhfHardware};
 
 use crate::Frequency;
 
@@ -103,7 +103,10 @@ pub struct RadioConfig {
     pub output: Output,
     /// Output gain, linear.
     pub gain: f32,
-    pub hardware: Hardware,
+    /// The set heard on VHF frequencies…
+    pub vhf_hardware: VhfHardware,
+    /// …and the one heard on HF.
+    pub hf_hardware: HfHardware,
     /// Simulate static, noise and the radio's frequency response.
     pub effects: bool,
     /// Suppress HF background noise.
@@ -121,7 +124,8 @@ impl RadioConfig {
             coupling: Coupling::None,
             output: Output::default(),
             gain: 1.0,
-            hardware: Hardware::default(),
+            vhf_hardware: VhfHardware::default(),
+            hf_hardware: HfHardware::default(),
             effects: true,
             hf_squelch: false,
         }
@@ -144,7 +148,8 @@ impl RadioConfig {
             gain: self.gain,
             effects: self.effects,
             hf_squelch: self.hf_squelch,
-            hardware: self.hardware,
+            vhf_hardware: self.vhf_hardware,
+            hf_hardware: self.hf_hardware,
             muted: false,
             pan: self.output.pan,
         }

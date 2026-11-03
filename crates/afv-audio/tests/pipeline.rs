@@ -6,6 +6,7 @@ use afv_audio::dsp::HfChannel;
 use afv_audio::radio::{Output, Signal};
 use afv_audio::{
     Bus, Carrier, EffectSamples, FRAME_SAMPLES, Frame, HfConditions, Pan, Radio, RadioSettings, RxChange, Transmitter,
+    VhfHardware,
 };
 use afv_proto::voice::RxTransceiver;
 
@@ -402,31 +403,99 @@ fn hf_radios_do_not_click_at_the_end_of_a_transmission() {
     assert!(end(true) > 1.0, "with HF squelch the click is back: {}", end(true));
 }
 
-#[test]
-fn hf_radios_hear_through_a_sideband_filter() {
-    // 150 Hz is inside the hardware filter's gentle skirt but far outside the SSB passband.
-    let level = |settings: RadioSettings, freq: f64| {
-        let mut radio = Radio::new(settings.clone());
-        radio.set_hf_conditions(HfConditions::OFF);
-        let fx = EffectSamples::default();
-        let transceivers = rx(settings.frequency, 1.0);
-        let out: Vec<f32> =
-            (0..50).flat_map(|i| process(&mut radio, &[(&sine(i, freq as f32, 0.05), &transceivers)], &fx).0).collect();
-        tone(&out[24_000..], freq)
+/// `frames` frames of `radio` receiving `voice(frame_index)`, from frame `first` on.
+fn frames(radio: &mut Radio, first: usize, frames: usize, voice: impl Fn(usize) -> Frame) -> Vec<f32> {
+    let (fx, transceivers) = (EffectSamples::default(), rx(radio.settings().frequency, 1.0));
+    (first..first + frames).flat_map(|i| process(radio, &[(&voice(i), &transceivers)], &fx).0).collect()
+}
+
+fn radio(settings: RadioSettings) -> Radio {
+    let mut radio = Radio::new(settings);
+    radio.set_hf_conditions(HfConditions::OFF);
+    radio
+}
+
+fn hf_radio() -> Radio {
+    radio(RadioSettings { frequency: HF, ..RadioSettings::default() })
+}
+
+/// A 1 kHz tone plus a weaker one at `freq`; returns the level of `freq` relative to 1 kHz, in
+/// dB. With both at once the gain control is set by the 1 kHz tone, so the ratio is the filter's.
+fn relative_db(radio: &mut Radio, freq: f32) -> f32 {
+    let two_tone = |i| -> Frame {
+        let (a, b) = (sine(i, 1000.0, 0.5), sine(i, freq, 0.05));
+        std::array::from_fn(|n| a[n] + b[n])
     };
-    let hf = RadioSettings { frequency: HF, ..RadioSettings::default() };
-    let vhf = RadioSettings { frequency: FREQ, ..RadioSettings::default() };
-    let rejection = |s: RadioSettings| level(s.clone(), 1000.0) / level(s, 150.0);
-    let (hf, vhf) = (rejection(hf), rejection(vhf));
-    assert!(hf > 1000.0, "HF: 1 kHz is {hf}× 150 Hz");
-    assert!(vhf < 100.0, "VHF keeps its hardware response: 1 kHz is {vhf}× 150 Hz");
+    let out = frames(radio, 0, 50, two_tone);
+    20.0 * (10.0 * tone(&out[24_000..], freq as f64) / tone(&out[24_000..], 1000.0)).log10()
+}
+
+#[test]
+fn hf_radios_hear_through_the_hfs900d() {
+    let vhf = |f| relative_db(&mut radio(RadioSettings { frequency: FREQ, ..RadioSettings::default() }), f);
+    let hf = |f| relative_db(&mut hf_radio(), f);
+    // Collins' published mask: 35 dB down at 2900 Hz, 60 dB at 3300 Hz.
+    assert!(vhf(2900.0) > -20.0, "VHF passes 2.9 kHz: {} dB", vhf(2900.0));
+    assert!(hf(2900.0) < -35.0, "HF at 2.9 kHz: {} dB", hf(2900.0));
+    assert!(hf(3300.0) < -55.0, "HF at 3.3 kHz: {} dB", hf(3300.0));
+    assert!(hf(150.0) < -35.0, "HF at 150 Hz: {} dB", hf(150.0));
+    assert!(hf(2400.0).abs() < 4.0 && hf(400.0).abs() < 4.0, "HF passband: {} and {} dB", hf(2400.0), hf(400.0));
+}
+
+#[test]
+fn the_vhf_set_never_colours_hf() {
+    let render = |vhf_hardware| {
+        let mut r = radio(RadioSettings { frequency: HF, vhf_hardware, ..RadioSettings::default() });
+        frames(&mut r, 0, 30, |i| sine(i, 700.0, 0.4))
+    };
+    let schmid = render(VhfHardware::SchmidEd137b);
+    assert_eq!(render(VhfHardware::RockwellCollins2100), schmid);
+    assert_eq!(render(VhfHardware::Garex220), schmid);
+}
+
+#[test]
+fn the_hf_agc_holds_the_level_and_the_volume_comes_after_it() {
+    let level = |amplitude: f32, gain: f32| {
+        let mut r = radio(RadioSettings { frequency: HF, gain, ..RadioSettings::default() });
+        let out = frames(&mut r, 0, 50, |i| sine(i, 1000.0, amplitude));
+        tone(&out[24_000..], 1000.0)
+    };
+    let (loud, quiet) = (level(1.0, 1.0), level(0.5, 1.0));
+    assert!((loud / quiet - 1.0).abs() < 0.05, "6 dB less signal, same output: {loud} vs {quiet}");
+    let turned_down = level(1.0, 0.5);
+    assert!((turned_down / loud - 0.5).abs() < 0.005, "volume halves the output: {turned_down} vs {loud}");
+}
+
+#[test]
+fn an_hf_set_comes_back_from_transmitting_like_new() {
+    let voice = |i| sine(i, 700.0, 0.6);
+    let mut r = hf_radio();
+    frames(&mut r, 0, 50, voice);
+    r.set_transmitting(true);
+    frames(&mut r, 50, 10, voice);
+    r.set_transmitting(false);
+    let after = frames(&mut r, 60, 50, voice);
+    assert_eq!(after, frames(&mut hf_radio(), 60, 50, voice));
+}
+
+#[test]
+fn retuning_across_bands_switches_the_set() {
+    let voice = |i| sine(i, 700.0, 0.6);
+    let mut r = radio(RadioSettings { frequency: FREQ, ..RadioSettings::default() });
+    frames(&mut r, 0, 50, voice);
+    r.set_settings(RadioSettings { frequency: HF, ..r.settings().clone() });
+    assert_eq!(frames(&mut r, 50, 50, voice), frames(&mut hf_radio(), 50, 50, voice));
+    assert!(relative_db(&mut r, 2900.0) < -35.0, "the HF set");
+    r.set_settings(RadioSettings { frequency: FREQ, ..r.settings().clone() });
+    assert!(relative_db(&mut r, 2900.0) > -20.0, "back to the VHF set");
 }
 
 #[test]
 fn hf_static_goes_through_the_sideband_filter() {
-    // Static only: silent voice on an HF radio under heavy crackle.
+    // Static only: silent voice on an HF radio under frequent crackle, quiet enough not to drive
+    // the audio stage into saturation (whose harmonics would reach beyond the sideband).
     let mut radio = Radio::new(RadioSettings { frequency: HF, ..RadioSettings::default() });
-    radio.set_hf_conditions(HfConditions { crackle_rate_hz: 20.0, crackle_level: 1.0, ..HfConditions::OFF });
+    radio.set_hf_conditions(HfConditions { crackle_rate_hz: 20.0, crackle_level: 0.05, ..HfConditions::OFF });
     let (fx, silence, transceivers) = (EffectSamples::default(), [0.0; FRAME_SAMPLES], rx(HF, 1.0));
     let out: Vec<f32> = (0..250).flat_map(|_| process(&mut radio, &[(&silence, &transceivers)], &fx).0).collect();
     let band = |lo: f64, hi: f64| (0..20).map(|k| tone(&out, lo + (hi - lo) * k as f64 / 20.0).powi(2)).sum::<f32>();

@@ -55,7 +55,7 @@ impl ClientBuilder {
     }
 
     /// Recordings for the radio simulation (noise, crackle, click). Without them radios play
-    /// clean voice through the hardware filter.
+    /// voice through their radio set alone.
     pub fn effects(mut self, effects: EffectSamples) -> Self {
         self.effects = effects;
         self

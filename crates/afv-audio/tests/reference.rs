@@ -1,4 +1,5 @@
-//! Compares the DSP ports against outputs of afv-native's original C/C++ code.
+//! Compares the DSP ports against outputs of afv-native's original C/C++ code. (The hardware
+//! filter is no longer a port: afv-rs keeps afv-native's EQ curves but not its dynamics.)
 //!
 //! `tests/data/*.f32` were produced by `tests/data/reference.cpp`, compiled against afv-native
 //! (commit fc7d216) with `-ffp-contract=off`, from a fixed 0.5 s test signal (`input.f32`) mixing
@@ -7,7 +8,7 @@
 //! The compressor reference includes afv-audio's one deliberate change: the detector starts
 //! settled instead of fully compressed. `reference.cpp` makes the same change to sndfilter's state.
 
-use afv_audio::dsp::{Compressor, Hardware, HardwareFilter, RmsAgc};
+use afv_audio::dsp::{Compressor, RmsAgc};
 use afv_audio::{FRAME_SAMPLES, Frame, SAMPLE_RATE};
 
 fn load(name: &str) -> Vec<f32> {
@@ -42,20 +43,6 @@ fn assert_matches(name: &str, actual: &[f32], tolerance: f32) {
     );
     // Guard against a degenerate reference (e.g. all zeros) making the test meaningless.
     assert!(expected.iter().any(|v| v.abs() > 0.05), "{name}: reference is silent");
-}
-
-#[test]
-fn hardware_filters_match_afv_native() {
-    let input = load("input.f32");
-    for (hw, name) in [
-        (Hardware::SchmidEd137b, "hardware_schmid.f32"),
-        (Hardware::RockwellCollins2100, "hardware_rockwell.f32"),
-        (Hardware::Garex220, "hardware_garex.f32"),
-    ] {
-        let mut filter = HardwareFilter::new(hw);
-        let out = per_frame(&input, |f| filter.process(f));
-        assert_matches(name, &out, 1e-5);
-    }
 }
 
 #[test]

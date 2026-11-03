@@ -11,11 +11,11 @@ use afv_proto::consts::HF_UPPER_LIMIT_HZ;
 use afv_proto::voice::RxTransceiver;
 
 use crate::codec::OpusError;
-use crate::dsp::{Carrier, HfChannel, HfConditions, RmsAgc};
+use crate::dsp::{Carrier, Compressor, HfChannel, HfConditions, RmsAgc};
 use crate::effects::{EffectSamples, SamplePlayer, Samples};
 use crate::radio::{Output, Radio, RadioSettings, RxChange, Signal};
 use crate::stream::RemoteStream;
-use crate::{FRAME_SAMPLES, Frame};
+use crate::{FRAME_SAMPLES, Frame, SAMPLE_RATE};
 
 /// Caller-chosen radio identifier.
 pub type RadioId = u32;
@@ -28,7 +28,9 @@ struct Talker {
     carrier: Carrier,
     frame: Box<Frame>,
     has_frame: bool,
-    /// Propagation applied when the talker transmits on HF, and its result for this frame.
+    /// The speech processor of the talker's HF transmitter, then propagation, applied when the
+    /// talker transmits on HF, and their result for this frame.
+    speech_processor: Compressor,
     hf: HfChannel,
     hf_frame: Box<Frame>,
     on_hf: bool,
@@ -143,6 +145,7 @@ impl Bus {
                     carrier,
                     frame: Box::new([0.0; FRAME_SAMPLES]),
                     has_frame: false,
+                    speech_processor: Compressor::default_for_rate(SAMPLE_RATE),
                     hf: HfChannel::for_callsign(callsign),
                     hf_frame: Box::new([0.0; FRAME_SAMPLES]),
                     on_hf: false,
@@ -192,7 +195,9 @@ impl Bus {
             t.has_frame = t.stream.is_active() && t.stream.next_frame(&mut t.frame);
             t.on_hf = t.has_frame && t.stream.transceivers().iter().any(|x| x.frequency < HF_UPPER_LIMIT_HZ);
             if t.on_hf {
-                t.hf.process(&self.hf_conditions, &t.frame, &mut t.hf_frame);
+                self.fetch.copy_from_slice(&t.frame[..]);
+                t.speech_processor.process(&mut self.fetch[..]);
+                t.hf.process(&self.hf_conditions, &self.fetch, &mut t.hf_frame);
             }
         }
         let talkers = &self.talkers;

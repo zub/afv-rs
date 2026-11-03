@@ -212,6 +212,14 @@ impl Compressor {
         self.a * x2 * x + self.b * x2 + self.c * x + self.d
     }
 
+    /// Back to the state it starts in: settled, with an empty pre-delay.
+    pub fn reset(&mut self) {
+        (self.detector_avg, self.comp_gain, self.max_comp_diff_db) = (1.0, 1.0, -1.0);
+        self.delay_write = 0;
+        self.delay_read = if self.delay_size > 1 { 1 } else { 0 };
+        self.delay.fill(0.0);
+    }
+
     /// Processes `samples` in place.
     pub fn process(&mut self, samples: &mut [f32]) {
         let ang90 = PI * 0.5;
@@ -391,6 +399,18 @@ mod tests {
         };
         assert!(gain_at(10) < 0.5 * c.master_gain, "still compressing 10 ms after: {}", gain_at(10));
         assert!((gain_at(500) - c.master_gain).abs() < 0.01 * c.master_gain, "recovered: {}", gain_at(500));
+    }
+
+    #[test]
+    fn reset_restores_the_initial_state() {
+        let input: Vec<f32> = sine(450.0, 1.0, 4800).into_iter().chain(sine(450.0, 0.01, 4800)).collect();
+        let mut c = compressor();
+        let mut first = input.clone();
+        c.process(&mut first);
+        c.reset();
+        let mut second = input;
+        c.process(&mut second);
+        assert_eq!(first, second);
     }
 
     #[test]

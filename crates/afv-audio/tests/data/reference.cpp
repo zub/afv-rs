@@ -1,5 +1,4 @@
 // Runs afv-native's original DSP code on a fixed signal to produce reference outputs.
-#include "afv-native/audio/VHFFilterSource.h"
 #include <compressor/compressor.h>
 #include "afv-native/audio/RmsAgc.h"
 #include <cmath>
@@ -80,15 +79,6 @@ int main(int argc, char **argv) {
     std::string dir = argc > 1 ? argv[1] : ".";
     auto in = make_input();
     write(dir, "input.f32", in);
-    const std::pair<HardwareType, const char *> hw[] = {
-        {HardwareType::Schmid_ED_137B, "hardware_schmid.f32"},
-        {HardwareType::Rockwell_Collins_2100, "hardware_rockwell.f32"},
-        {HardwareType::Garex_220, "hardware_garex.f32"},
-    };
-    for (auto &[type, name]: hw) {
-        VHFFilterSource f(type);
-        write(dir, name, per_frame(in, [&](float *o, const float *i) { f.transformFrame(o, i); }));
-    }
     SettledCompressor comp;
     write(dir, "compressor.f32", per_frame(in, [&](float *o, const float *i) { comp.transformFrame(o, i); }));
     RmsAgc agc;

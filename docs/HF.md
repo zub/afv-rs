@@ -66,14 +66,24 @@ below its nominal level under `FAIR` (7 % more than 20 dB below), and a third of
 
 An HF receiver never goes quiet: the sum of all the world's distant lightning, plus man-made
 noise, forms a constant hiss. The voice rides on top of it, so a fade does not just make the voice
-quieter, it makes it sink into the noise. And because a receiver's gain control turns the gain up
-when the signal weakens, the hiss rises in the pauses and fades.
+quieter, it makes it sink into the noise. An HF receiver's AGC holds its gain through the short
+pauses between words ("hang"), so during a transmission the hiss stays where the signal put it;
+it rises only in fades, and after the transmission ends.
 
-**Model.** White noise ahead of the sideband filter and the radio's compressor, so the compressor
-pumps it as a receiver's gain control would. `noise_level` is relative to an unfaded voice as
-heard: 1 is 0 dB signal-to-noise, 0.45 is 7 dB, 0.2 is 14 dB, 0.08 is 22 dB. That is calibrated
-on the default radio (Schmid ED-137B); the Rockwell and Garex presets come out 4–6 dB cleaner,
-because their equalisers lift noise less.
+**Model.** White noise ahead of the receiving set. `noise_level` is the noise relative to an
+unfaded voice, both measured in a 300–3000 Hz voice channel: 1 is 0 dB signal-to-noise, 0.1 is
+20 dB. A set with a narrower filter hears a little less of it, as a real one does. ITU-R grades
+SSB telephony by the least signal-to-noise each grade needs (F.339, quoted in F.240): 33 dB for
+good commercial quality, 15 dB for marginally commercial and 6 dB for just usable. Circuits are
+planned to do better than their grade's minimum, so the presets sit inside the grades: `GOOD` at
+40 dB, `FAIR` at 26 dB (between the two commercial grades), `POOR` at 16 dB (marginally
+commercial). Just usable is a `noise_level` of 0.5. Measured as active speech against the noise
+at the output of the HF set (section 6), the setting and the result agree within about 1 dB.
+
+The set's hang AGC holds the gain between words, so the hiss does not swell in every pause. It
+rises in fades, and between transmissions by up to the set's reserve of gain. The transmitting
+station's speech processor (a compressor, as on HF SSB transmitters) works on the voice alone,
+before propagation, so it never pumps the noise.
 
 ## 4. Static crashes: crackle and blips
 
@@ -83,7 +93,7 @@ them: mostly small pops, the occasional loud crash, and often a run of crackling
 
 **Why they sound like blips rather than clicks.** The pulse itself is far shorter than a
 millisecond. What you hear is the receiver's response to it. An SSB receiver has a steep crystal
-filter that lets through only the voice band, about 300–2700 Hz. A filter that steep "rings" when
+filter that lets through only the voice band, about 300–2500 Hz. A filter that steep "rings" when
 it is hit by an impulse, so a click comes out as a short burst at the filter's own frequencies,
 lasting a few milliseconds. That is the blip. A Motorola patent on SSB noise blanking describes
 exactly this: a sub-microsecond spike stretched to several milliseconds by the receiver's filters.
@@ -96,30 +106,63 @@ is still a broadband click, and the receiver's filter is what gives it its pitch
 **Model.** Impulses 0.03–0.33 ms long arrive at random, `crackle_rate_hz` per second on average,
 with sizes skewed so that most are small. A large one starts a 50–250 ms run in which they come ten
 times as often. `crackle_level` sets their loudness. The static is added to the received signal,
-and both pass through an 8th-order 300–2700 Hz **sideband filter**, as in a real set. That filter
-makes the blips, and then the radio's compressor does the ducking that a receiver's gain control
-would.
+and both pass through the HF set's **sideband filter** (section 6), which makes the blips. Its AGC
+turns down for a big crash and holds, so the voice dips for a moment after it; the leading edge of
+a crash outruns the AGC's attack, and a look-ahead limiter at the end of the set stops it from
+clipping.
 
 ## 5. Ionospheric sounders
 
 Ionospheric sounders ("chirp sounders") measure propagation by sweeping a transmitter across the
 whole HF band, typically at 100 kHz per second, and listening for the echo. A receiver tuned
-anywhere in the band hears each sweep go by. At 100 kHz/s it crosses the 2.4 kHz voice passband in
-about 25 ms, which comes out of the speaker as a short tone sliding up in pitch: a "blip" (or
+anywhere in the band hears each sweep go by. At 100 kHz/s it crosses the 2.2 kHz voice passband in
+about 22 ms, which comes out of the speaker as a short tone sliding up in pitch: a "blip" (or
 "bloop" for the few that sweep downwards). Dozens of sounders run around the world, so on a busy
 day they pass every few seconds.
 
 **Model.** Sweeps arrive at random, `sounder_rate_hz` per second on average. Most go up at
 100 kHz/s, some at 50 or 125 kHz/s, one in five downwards. Their strength varies over 20 dB up to
-`sounder_level`, and half arrive with an echo 1–4 ms later over a second path. Like the static they
+`sounder_level`, and half arrive with an echo 1–4 ms later over a second path. Sounders are
+transmitters of their own, so they do not depend on the station being heard: every preset but
+`OFF` has the same, 0.1 per second at level 0.8. Like the static they
 go through the sideband filter, which shapes their start and end.
+
+## 6. The receiving set: Collins HFS-900D
+
+HF frequencies are always heard through an HF set (`RadioSettings::hf_hardware`), never through
+the VHF sets, which have no business on HF. The one simulated is the Collins HFS-900D, an
+ARINC 719 HF voice and data (HFDL) radio common in airliners, the 737NG among them.
+
+**Selectivity (published).** Collins' data sheet gives the SSB passband as varying less than
+4 dB from 350 to 2500 Hz, at least 35 dB down at 2900 Hz and on the carrier side, and 60 dB down
+beyond 3300 Hz. afv-rs meets that mask with a 10th-order Chebyshev low-pass (2 dB ripple, ending at
+2500 Hz: 40 dB down at 2900 Hz, 61 dB at 3300 Hz) and a 6th-order Butterworth high-pass at 300 Hz.
+The upper edge falls 35 dB in 400 Hz: the set sounds narrow, with nothing above 2.5 kHz, and its
+filter rings a little on static.
+
+**AGC (not published; typical of its class).** The gain falls to the loudest peaks with a 3 ms
+attack (looking 2 ms ahead), holds for a quarter of a second after the signal drops, so it does
+not pump up between words, then recovers at 20 dB per second. It can rise at most 8 dB above what
+an unfaded voice needs, like the RF sensitivity control turned down to where crews usually leave
+it: moderate fades are made up for, and between transmissions the hiss comes up by that much. The
+Marconi 915, an airborne HF set of the same class, specifies at most 12 ms attack and 1.5 s
+recovery.
+
+**Audio.** The response is flat; typical speech plays about 7 dB below the VHF sets. The radio's
+volume comes after the set, as on the real one.
+
+**Not modelled.** The set's own frequency error (±20 Hz, from an oven-controlled oscillator)
+is well inside the per-station tuning errors of section 1. Its transmit audio response is not
+applied: the hardware only shapes what you hear. AM reception, SELCAL and the 100 Hz channel steps
+are not simulated.
 
 ## Where it all happens
 
 ```
-each station:   voice ─ decoder ─ mistuning + multipath fading ─┐
-                                                               mix ─ + noise, static, sounders ─ SSB filter ─ hardware EQ ─ compressor ─ out
-each HF radio:                                                  ┘
+each station:   voice ─ decoder ─ speech processor ─ mistuning + multipath fading ─┐
+                                                                                  mix ─ + noise, static, sounders ─ HF set ─ volume ─ out
+each HF radio:                                                                     ┘
+HF set:         sideband filter ─ hang AGC ─ limiter
 ```
 
 Only HF radios (below 30 MHz) with `effects` on are affected.
@@ -129,21 +172,22 @@ radio plays its background all the time it is on: noise, static and sounders, be
 transmissions as well as during them. For the same reason there is no squelch click at the end of
 a transmission. It falls silent while you transmit or when the radio is muted. `hf_squelch`
 restores the afv-native behaviour: no background at all, and the click. afv-native's optional HF
-noise recording, if loaded, plays after the compressor whenever the background does.
+noise recording, if loaded, plays after the audio stage whenever the background does.
 
 ## Presets
 
 | | Offset | Drift | Path delay | Doppler spread | Depth | Slow fading | Noise | Crashes/s | Static | Sounders/s |
 |---|---|---|---|---|---|---|---|---|---|---|
 | `OFF` | 0 | 0 | — | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
-| `GOOD` | ±40 Hz | ±5 Hz | 0.5 ms | 0.1 Hz | 0.8 | 2 dB | 0.08 (22 dB S/N) | 0.5 | 0.3 | 0.03 |
-| `FAIR` (default) | ±200 Hz | ±25 Hz | 1 ms | 0.5 Hz | 1 | 9 dB | 0.2 (14 dB) | 2 | 0.6 | 0.06 |
-| `POOR` | ±500 Hz | ±60 Hz | 2 ms | 1 Hz | 1 | 14 dB | 0.45 (7 dB) | 6 | 1 | 0.1 |
-| `FLUTTER` | ±200 Hz | ±25 Hz | 0.5 ms | 10 Hz | 1 | 9 dB | 0.2 (14 dB) | 2 | 0.6 | 0.06 |
+| `GOOD` | ±40 Hz | ±5 Hz | 0.5 ms | 0.1 Hz | 0.8 | 2 dB | 0.01 (40 dB S/N) | 0.5 | 0.3 | 0.1 |
+| `FAIR` (default) | ±200 Hz | ±25 Hz | 1 ms | 0.5 Hz | 1 | 9 dB | 0.05 (26 dB) | 2 | 0.6 | 0.1 |
+| `POOR` | ±500 Hz | ±60 Hz | 2 ms | 1 Hz | 1 | 14 dB | 0.16 (16 dB) | 6 | 1 | 0.1 |
+| `FLUTTER` | ±200 Hz | ±25 Hz | 0.5 ms | 10 Hz | 1 | 9 dB | 0.05 (26 dB) | 2 | 0.6 | 0.1 |
 
-The fast fading follows Watterson's reference channels. The tuning offsets, slow fading, noise,
-static and sounder figures are set by ear to match what pilots and controllers actually hear, not
-taken from measurements.
+The fast fading follows Watterson's reference channels, and the noise floors sit within ITU-R's
+quality grades.
+The tuning offsets, slow fading, static and sounder figures are set by ear to match what pilots
+and controllers actually hear, not taken from measurements.
 
 ## Sources
 
@@ -159,7 +203,16 @@ taken from measurements.
   circuitry for single sideband receivers": crystal filters stretching static impulses.
 - Wikipedia, ["Ionosonde"](https://en.wikipedia.org/wiki/Ionosonde), and G3PLX, ["Chirp
   sounders"](https://jcoppens.com/radio/prop/g3plx/chirps.en.php): most sweep upwards at 100 kHz/s,
-  heard here through a 2.4 kHz passband.
+  heard here through a 2.2 kHz passband.
+- Collins (Rockwell Collins), ["HFS-900D High Speed Data Radio"](https://www.radiomanual.info/schemi/Surplus_Civil/Collins_HFS-900D_broch_2015.pdf),
+  data sheet 147-0795-001, 2015: selectivity, sensitivity, frequency stability, RF sensitivity
+  control.
+- Marconi, ["915 HF Airborne Transceiver"](http://pdf.textfiles.com/manuals/SCANNERS-F-R/Marconi_915%20HF%20Airborne%20Transceivers_Datasheet.pdf)
+  data sheet: AGC timing of an airborne HF set of the same class.
+- ITU-R, [Recommendation F.240-6](https://www.itu.int/dms_pubrec/itu-r/rec/f/R-REC-F.240-6-199203-S!!PDF-E.pdf)
+  and [F.339-8](https://www.itu.int/dms_pubrec/itu-r/rec/f/R-REC-F.339-8-201302-I!!PDF-E.pdf):
+  33, 15 and 6 dB audio signal-to-noise for good commercial, marginally commercial and just usable
+  SSB telephony.
 - Wikipedia, ["Donald Duck talk"](https://en.wikipedia.org/wiki/Donald_Duck_talk), and a 1970 Naval
   Postgraduate School report ([calhoun.nps.edu](https://calhoun.nps.edu/entities/publication/f341cc35-61c1-484b-a130-bbc41fa9e149))
   on how closely SSB can be tuned by ear (about 20–30 Hz).
