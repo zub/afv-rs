@@ -1,4 +1,19 @@
 //! Mistuning and multipath fading of one station's signal.
+//!
+//! # References
+//!
+//! - C. C. Watterson, J. R. Juroshek and W. D. Bensema, "Experimental confirmation of an HF
+//!   channel model", *IEEE Transactions on Communication Technology* 18(6), 1970: each path's
+//!   gain is a complex Gaussian process with a Gaussian Doppler spectrum.
+//! - M. Pätzold, *Mobile Fading Channels*, Wiley, 2002: synthesising such a process as a sum of
+//!   sinusoids with randomly drawn Doppler frequencies (the Monte Carlo method).
+//! - S. O. Rice, "Mathematical analysis of random noise", *Bell System Technical Journal* 23–24,
+//!   1944–45: the level-crossing rate the fading-speed test checks against.
+//! - O. Niemitalo, ["Polyphase IIR Hilbert transformers"](https://yehar.com/blog/?p=368): the
+//!   allpass pair that makes the analytic signal for the frequency shift.
+//! - Naval Postgraduate School, 1970 report on tuning SSB by ear
+//!   ([calhoun.nps.edu](https://calhoun.nps.edu/entities/publication/f341cc35-61c1-484b-a130-bbc41fa9e149)):
+//!   errors of 20–30 Hz are already noticeable.
 
 use std::ops::RangeInclusive;
 
@@ -43,8 +58,8 @@ impl Allpass {
     }
 }
 
-/// Splits a signal into two outputs 90° apart, using two chains of allpass filters (Olli
-/// Niemitalo's 8th-order polyphase IIR design). Both outputs keep the input's magnitude.
+/// Splits a signal into two outputs 90° apart, using two chains of allpass filters (Niemitalo's
+/// 8th-order polyphase IIR design). Both outputs keep the input's magnitude.
 #[derive(Debug, Clone)]
 struct Hilbert {
     a: [Allpass; 4],
@@ -85,9 +100,9 @@ fn lerp(a: Complex, b: Complex, t: f64) -> Complex {
     (a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t)
 }
 
-/// The complex gain of one propagation path: a steady component plus a scattered one whose
-/// spectrum is Gaussian, synthesised as a sum of sinusoids at normally distributed Doppler
-/// frequencies.
+/// The complex gain of one propagation path (Watterson et al. 1970): a steady component plus a
+/// scattered one whose spectrum is Gaussian, synthesised as a sum of sinusoids at normally
+/// distributed Doppler frequencies (Pätzold's Monte Carlo method).
 #[derive(Debug, Clone)]
 struct Path {
     /// Doppler frequencies in units of σ.

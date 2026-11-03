@@ -1,4 +1,8 @@
 //! The automatic gain control of an SSB receiver.
+//!
+//! Each set supplies its own timing ([`HangTiming`]); see the HFS-900D's in
+//! [`hardware`](super::hardware), which follows the Marconi 915 airborne HF transceiver's data
+//! sheet (at most 12 ms attack and 1.5 s recovery).
 
 use super::voice_rms;
 use crate::SAMPLE_RATE;

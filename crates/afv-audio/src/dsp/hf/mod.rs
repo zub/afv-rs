@@ -15,6 +15,22 @@
 //!
 //! [`HfChannel`] applies mistuning and fading to one station; [`Atmospherics`] makes the noise,
 //! static and sounders at the receiver. Both take their strengths from [`HfConditions`].
+//!
+//! # References
+//!
+//! - C. C. Watterson, J. R. Juroshek and W. D. Bensema, ["Experimental confirmation of an HF
+//!   channel model"](https://forohistorico.coit.es/index.php/biblioteca/articulos-seminales/item/experimental-confirmation-of-an-hf-channel-model),
+//!   *IEEE Transactions on Communication Technology* 18(6), 1970: the two-path model with
+//!   Gaussian Doppler spectra, and the reference channels behind the presets.
+//! - CCIR Recommendation 520 and ITU-R Recommendation F.1487, *Testing of HF modems … using
+//!   ionospheric channel simulators*: the good, moderate, poor and flutter channels. MathWorks,
+//!   ["HF Ionospheric Channel Models"](https://www.mathworks.com/help/comm/ug/hf-ionospheric-channel-models.html),
+//!   explains both.
+//! - ITU-R Recommendations
+//!   [F.339-8](https://www.itu.int/dms_pubrec/itu-r/rec/f/R-REC-F.339-8-201302-I!!PDF-E.pdf) and
+//!   [F.240-6](https://www.itu.int/dms_pubrec/itu-r/rec/f/R-REC-F.240-6-199203-S!!PDF-E.pdf):
+//!   the signal-to-noise ratios of SSB telephony's grades of service, which bound the noise
+//!   presets.
 
 mod atmospherics;
 mod channel;
@@ -22,8 +38,8 @@ mod channel;
 pub(crate) use atmospherics::Atmospherics;
 pub use channel::HfChannel;
 
-// The noise floors of the presets, 40, 26 and 16 dB signal-to-noise. ITU-R F.339 grades SSB
-// telephony by the least signal-to-noise each grade needs: 33 dB for good commercial quality,
+// The noise floors of the presets, 40, 26 and 16 dB signal-to-noise. ITU-R F.339 (quoted in
+// F.240) grades SSB telephony by the least signal-to-noise each grade needs: 33 dB for good commercial quality,
 // 15 dB for marginally commercial and 6 dB for just usable. Circuits are planned to do better than
 // their grade's minimum, so GOOD sits well above good commercial, FAIR between the two commercial
 // grades and POOR at marginally commercial. Just usable is a `noise_level` of 0.5.
@@ -44,7 +60,7 @@ pub struct HfConditions {
     /// Largest slow drift around a station's tuning error, in Hz.
     pub drift_hz: f32,
     /// Delay between the two propagation paths, in ms; 0 for a single path. Watterson's
-    /// reference channels use 0.5 (good), 1 (moderate) and 2 ms (poor).
+    /// reference channels (CCIR 520, ITU-R F.1487) use 0.5 (good), 1 (moderate) and 2 ms (poor).
     pub multipath_delay_ms: f32,
     /// Doppler spread of each path in Hz, i.e. how fast it fades: 0.1 (good), 0.5 (moderate),
     /// 1 (poor), 10 (polar flutter). 0 stops fading.

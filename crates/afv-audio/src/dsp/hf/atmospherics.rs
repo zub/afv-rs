@@ -1,4 +1,16 @@
 //! What an HF receiver hears besides the signal: the noise floor, static and sounders.
+//!
+//! The strengths are set by ear, except the noise floor, whose presets sit within ITU-R F.339's
+//! grades (see the [`hf`](super) module).
+//!
+//! # References
+//!
+//! - Motorola, [US patent 4,466,129](https://patents.google.com/patent/US4466129), "Noise
+//!   reducing circuitry for single sideband receivers": an SSB receiver's filters stretch a
+//!   sub-microsecond static impulse into a burst of several milliseconds.
+//! - G3PLX, ["Chirp sounders"](https://jcoppens.com/radio/prop/g3plx/chirps.en.php), and
+//!   Wikipedia, ["Ionosonde"](https://en.wikipedia.org/wiki/Ionosonde): most sounders sweep
+//!   upwards at 100 kHz per second.
 
 use std::ops::RangeInclusive;
 
@@ -69,7 +81,7 @@ struct Burst {
 
 /// Atmospheric static: impulses from distant lightning, mostly small with the occasional loud
 /// crash, and often in runs. Each is a broadband click well under a millisecond long; the
-/// receiver's sideband filter turns it into a blip.
+/// receiver's sideband filter turns it into a blip (Motorola US 4,466,129).
 #[derive(Debug, Clone)]
 struct Crackle {
     rng: SmallRng,
@@ -203,9 +215,9 @@ struct Chirp {
     active: bool,
 }
 
-/// Ionospheric chirp sounders. Each sweeps the whole HF band at about 100 kHz per second, so it
-/// crosses a receiver's 2.2 kHz passband in a few tens of milliseconds: a short tone sliding up
-/// (or, for the few that sweep downwards, down). Some arrive with an echo over a second path.
+/// Ionospheric chirp sounders. Each sweeps the whole HF band, most at 100 kHz per second (G3PLX),
+/// so it crosses a receiver's 2.2 kHz passband in a few tens of milliseconds: a short tone sliding
+/// up (or, for the few that sweep downwards, down). Some arrive with an echo over a second path.
 #[derive(Debug, Clone)]
 struct Sounders {
     rng: SmallRng,

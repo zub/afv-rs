@@ -1,5 +1,14 @@
 //! Second-order IIR sections ("biquads") and cascades of them: the RBJ "Audio EQ Cookbook"
 //! designs, and Butterworth and Chebyshev band-passes built from them.
+//!
+//! # References
+//!
+//! - R. Bristow-Johnson, "Cookbook formulae for audio equalizer biquad filter coefficients",
+//!   published as the W3C [Audio EQ Cookbook](https://www.w3.org/TR/audio-eq-cookbook/): the
+//!   low-pass, high-pass, peaking and shelving sections.
+//! - A. B. Williams and F. J. Taylor, *Electronic Filter Design Handbook*, McGraw-Hill: the pole
+//!   positions of the Butterworth and Chebyshev (type I) low-pass prototypes, and the low-pass to
+//!   high-pass transformation.
 
 use std::f64::consts::PI;
 
@@ -20,7 +29,7 @@ impl Default for Biquad {
     }
 }
 
-/// The cookbook's `cos ω0` and `α` for a corner or centre frequency and Q.
+/// The cookbook's `cos ω0` and `α` for a corner or centre frequency and Q (Bristow-Johnson).
 fn cookbook(freq: f64, q: f64) -> (f64, f64) {
     let w0 = 2.0 * PI * freq / SAMPLE_RATE as f64;
     (w0.cos(), w0.sin() / (2.0 * q))

@@ -10,6 +10,20 @@
 //!
 //! VHF sets ([`VhfHardware`]) and HF sets ([`HfHardware`]) are chosen separately, so that a radio
 //! always hears HF through an HF set.
+//!
+//! # References
+//!
+//! - Collins (Rockwell Collins), ["HFS-900D High Speed Data Radio"](https://www.radiomanual.info/schemi/Surplus_Civil/Collins_HFS-900D_broch_2015.pdf),
+//!   data sheet 147-0795-001, 2015: the HFS-900D's SSB selectivity.
+//! - Marconi, ["915 HF Airborne Transceiver"](http://pdf.textfiles.com/manuals/SCANNERS-F-R/Marconi_915%20HF%20Airborne%20Transceivers_Datasheet.pdf)
+//!   data sheet: the AGC timing of an airborne HF set of the same class.
+//! - D. Byrne et al., "An international comparison of long-term average speech spectra",
+//!   *Journal of the Acoustical Society of America* 96(4), 1994: the speech spectrum the audio
+//!   responses are levelled against.
+//! - IEC 61672-1, *Electroacoustics — Sound level meters — Part 1: Specifications*: the
+//!   A-weighting curve.
+//! - The VHF sets' audio responses are afv-native's (`VHFFilterSource`); it gives no source for
+//!   them.
 
 use super::biquad::{self, Biquad, Cascade};
 use super::compressor::Compressor;
@@ -57,6 +71,24 @@ struct Skirt {
     ripple_db: f64,
 }
 
+impl Skirt {
+    const fn butterworth(order: usize, hz: f64) -> Self {
+        Self { order, hz, ripple_db: 0.0 }
+    }
+
+    const fn chebyshev(order: usize, hz: f64, ripple_db: f64) -> Self {
+        Self { order, hz, ripple_db }
+    }
+
+    fn high_pass(self) -> impl Iterator<Item = Biquad> {
+        biquad::high_pass(self.order, self.hz, self.ripple_db)
+    }
+
+    fn low_pass(self) -> impl Iterator<Item = Biquad> {
+        biquad::low_pass(self.order, self.hz, self.ripple_db)
+    }
+}
+
 /// A set's gain control.
 #[derive(Debug, Clone, Copy)]
 enum GainControlSpec {
@@ -65,7 +97,8 @@ enum GainControlSpec {
     Hang(HangTiming),
 }
 
-/// One section of an audio response: frequency in Hz, Q, and gain in dB where it applies.
+/// One stage of an audio response: a single section (frequency in Hz, Q, and gain in dB where it
+/// applies) or a whole filter skirt.
 #[derive(Debug, Clone, Copy)]
 enum Stage {
     HighPass(f64, f64),
@@ -73,8 +106,8 @@ enum Stage {
     Peak(f64, f64, f64),
     LowShelf(f64, f64, f64),
     HighShelf(f64, f64, f64),
-    /// Coefficients `[b0, b1, b2]` and `[a1, a2]`.
-    Raw([f64; 3], [f64; 2]),
+    HighPassSkirt(Skirt),
+    LowPassSkirt(Skirt),
 }
 
 use Stage::*;
@@ -89,8 +122,8 @@ struct Spec {
 }
 
 /// A VHF AM receiver's audio passband: 300–3000 Hz with 4th-order Butterworth skirts.
-const VHF_HIGH_PASS: Skirt = Skirt { order: 4, hz: 300.0, ripple_db: 0.0 };
-const VHF_LOW_PASS: Skirt = Skirt { order: 4, hz: 3000.0, ripple_db: 0.0 };
+const VHF_HIGH_PASS: Skirt = Skirt::butterworth(4, 300.0);
+const VHF_LOW_PASS: Skirt = Skirt::butterworth(4, 3000.0);
 
 const SCHMID_ED137B: Spec = Spec {
     high_pass: VHF_HIGH_PASS,
@@ -118,19 +151,14 @@ const GAREX_220: Spec = Spec {
         LowPass(3400.0, 0.25),
     ],
 };
-/// Its audio response is an elliptic band-pass of about 300–2700 Hz.
+/// Its audio response is a band-pass of about 300–2700 Hz with a steep upper edge. afv-native
+/// gave it as raw coefficients of an elliptic design; these two skirts follow its shape within
+/// 2.5 dB wherever it is above −40 dB.
 const ROCKWELL_COLLINS_2100: Spec = Spec {
     high_pass: VHF_HIGH_PASS,
     low_pass: VHF_LOW_PASS,
     gain_control: GainControlSpec::Compressor,
-    response: &[
-        Raw([0.0, 1.0, 0.753162969638192], [-1.7152995098277, 0.761385315196423]),
-        Raw([1.0, -2.29278115712509, 1.000336632935775], [-1.71626681678914, 0.762433947105989]),
-        Raw([1.0, -2.05042803669041, 1.05048374237779], [-1.79384214686345, 0.909678364879526]),
-        Raw([1.0, -1.95188929743297, 0.951942325888074], [-1.79409285259567, 0.909822671281377]),
-        Raw([1.0, -1.82547932903698, 1.09157529229851], [-1.9390093095185, 0.9411847259142]),
-        Raw([1.0, -1.67241244173042, 0.916184578658119], [-1.94022767750807, 0.942630574503006]),
-    ],
+    response: &[HighPassSkirt(Skirt::butterworth(2, 380.0)), LowPassSkirt(Skirt::chebyshev(8, 2690.0, 0.5))],
 };
 
 /// The Collins HFS-900D.
@@ -146,8 +174,8 @@ const ROCKWELL_COLLINS_2100: Spec = Spec {
 /// 20 dB per second, with 8 dB of gain in reserve, like the RF sensitivity control where crews
 /// usually leave it. Its audio response is flat.
 const COLLINS_HFS900D: Spec = Spec {
-    high_pass: Skirt { order: 6, hz: 300.0, ripple_db: 0.0 },
-    low_pass: Skirt { order: 10, hz: 2500.0, ripple_db: 2.0 },
+    high_pass: Skirt::butterworth(6, 300.0),
+    low_pass: Skirt::chebyshev(10, 2500.0, 2.0),
     gain_control: GainControlSpec::Hang(HangTiming {
         attack_s: 0.003,
         hang_s: 0.25,
@@ -178,14 +206,15 @@ impl HfHardware {
 }
 
 impl Stage {
-    fn biquad(self) -> Biquad {
+    fn sections(self) -> Vec<Biquad> {
         match self {
-            HighPass(f, q) => Biquad::high_pass(f, q),
-            LowPass(f, q) => Biquad::low_pass(f, q),
-            Peak(f, q, db) => Biquad::peaking(f, q, db),
-            LowShelf(f, q, db) => Biquad::low_shelf(f, q, db),
-            HighShelf(f, q, db) => Biquad::high_shelf(f, q, db),
-            Raw(b, [a1, a2]) => Biquad::new(b, [1.0, a1, a2]),
+            HighPass(f, q) => vec![Biquad::high_pass(f, q)],
+            LowPass(f, q) => vec![Biquad::low_pass(f, q)],
+            Peak(f, q, db) => vec![Biquad::peaking(f, q, db)],
+            LowShelf(f, q, db) => vec![Biquad::low_shelf(f, q, db)],
+            HighShelf(f, q, db) => vec![Biquad::high_shelf(f, q, db)],
+            HighPassSkirt(skirt) => skirt.high_pass().collect(),
+            LowPassSkirt(skirt) => skirt.low_pass().collect(),
         }
     }
 }
@@ -221,13 +250,12 @@ fn speech_gain(response: &Cascade<MAX_RESPONSE_SECTIONS>) -> f64 {
 
 impl Spec {
     fn selectivity(&self) -> Cascade<MAX_SELECTIVITY_SECTIONS> {
-        let (h, l) = (self.high_pass, self.low_pass);
-        Cascade::new(biquad::high_pass(h.order, h.hz, h.ripple_db).chain(biquad::low_pass(l.order, l.hz, l.ripple_db)))
+        Cascade::new(self.high_pass.high_pass().chain(self.low_pass.low_pass()))
     }
 
     /// The audio response and the gain that makes it play speech at [`SPEECH_GAIN`].
     fn response(&self) -> (Cascade<MAX_RESPONSE_SECTIONS>, f32) {
-        let response = Cascade::new(self.response.iter().map(|s| s.biquad()));
+        let response = Cascade::new(self.response.iter().flat_map(|s| s.sections()));
         let gain = (SPEECH_GAIN / speech_gain(&response)) as f32;
         (response, gain)
     }
@@ -332,6 +360,22 @@ mod tests {
                 assert!(at(1500.0) / at(outside) > 10.0, "{spec:?} at {outside} Hz");
             }
         }
+    }
+
+    #[test]
+    fn the_rockwell_response_is_a_band_pass_with_a_steep_upper_edge() {
+        let (response, _) = ROCKWELL_COLLINS_2100.response();
+        let db_at = |f: f64| (20.0 * (response.response(f) / response.response(1000.0)).log10()) as f32;
+        for f in [600.0, 1000.0, 1500.0, 2000.0, 2400.0] {
+            assert!(db_at(f).abs() < 1.0, "{f} Hz: {:.1} dB", db_at(f));
+        }
+        // The levels of afv-native's elliptic design at these frequencies, relative to 1 kHz.
+        for (f, expected) in
+            [(200.0, -12.2), (300.0, -4.4), (500.0, 0.0), (2800.0, -6.7), (3000.0, -16.1), (3300.0, -31.7)]
+        {
+            assert!((db_at(f) - expected).abs() < 2.5, "{f} Hz: {:.1} dB, expected {expected}", db_at(f));
+        }
+        assert!(db_at(4000.0) < -50.0, "{:.1} dB at 4 kHz", db_at(4000.0));
     }
 
     /// Gain of the HFS-900D's selectivity at `freq`, in dB, measured on a tone.
