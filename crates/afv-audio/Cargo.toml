@@ -3,7 +3,8 @@ name = "afv-audio"
 description = "Audio processing for Audio for VATSIM (AFV): Opus, jitter buffer and radio simulation. No devices, no network."
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+# Ports of afv-native (BSD-3-Clause) and sndfilter (MIT); see THIRD_PARTY.md.
+license = "MIT AND BSD-3-Clause"
 rust-version.workspace = true
 
 [dependencies]

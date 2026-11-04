@@ -5,7 +5,7 @@ members = ["crates/afv-proto", "crates/afv-audio", "crates/afv"]
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-license = "BSD-3-Clause"
+license = "MIT"
 rust-version = "1.95"
 
 [workspace.dependencies]
