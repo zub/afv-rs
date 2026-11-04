@@ -31,11 +31,7 @@ impl Frequency {
     }
 
     pub const fn is_833_channel(self) -> bool {
-        self.is_voice_vhf()
-            && match (self.0 / 1000) % 25 {
-                5 | 10 | 15 => true,
-                _ => false,
-            }
+        self.is_voice_vhf() && matches!((self.0 / 1000) % 25, 5 | 10 | 15)
     }
 
     /// HF radios (below 30 MHz) are single sideband and sound different. 0 is not HF.
