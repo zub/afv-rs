@@ -89,10 +89,10 @@ impl AmChannel {
             // Integer offsets make the phase periodic over one second, so it is exact forever.
             let turn =
                 (carrier.offset_hz as i64 * (self.clock as i64 + i as i64) + carrier.phase as i64).rem_euclid(rate);
-            let (sin, cos) = (std::f64::consts::TAU * turn as f64 / rate as f64).sin_cos();
+            let (sin, cos) = (std::f32::consts::TAU * turn as f32 / rate as f32).sin_cos();
             let amplitude = level * (1.0 + modulation * s).max(0.0);
-            *re += amplitude * cos as f32;
-            *im += amplitude * sin as f32;
+            *re += amplitude * cos;
+            *im += amplitude * sin;
         }
     }
 

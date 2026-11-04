@@ -47,11 +47,15 @@ pub struct RadioConfig {
     pub tx: bool,
     pub coupling: Coupling,          // None | Sites (own group) | Across (group 0)
     pub output: Output,              // bus: Headset | Speaker, pan: Both | Left | Right
+    pub audio: RadioAudio,           // how it sounds, below
+}
+
+pub struct RadioAudio {              // shared with afv-audio's RadioSettings
     pub gain: f32,
-    pub vhf_hardware: VhfHardware,   // Schmid ED-137B | Rockwell Collins 2100 | Garex 220
-    pub hf_hardware: HfHardware,     // Collins HFS-900D
     pub effects: bool,
     pub hf_squelch: bool,
+    pub vhf_hardware: VhfHardware,   // Schmid ED-137B | Rockwell Collins 2100 | Garex 220
+    pub hf_hardware: HfHardware,     // Collins HFS-900D
     pub muted: bool,                 // play nothing, still report reception
 }
 ```
@@ -87,7 +91,7 @@ while let Some(event) = events.next().await {
     }
 }
 
-let sites = client.station_transceivers("ENGM_TWR").await?;   // plain async fns
+let sites = client.session().station_transceivers("ENGM_TWR").await?;   // plain async fns
 client.disconnect().await;
 ```
 
@@ -160,7 +164,7 @@ HF:  voices (speech processor, mistuning, fading) + noise, static, sounders ─ 
 
 On HF the compressor moves to each transmitting station as its speech processor, ahead of
 propagation, so it shapes the voice without pumping the noise (see [HF.md](HF.md)).
-`RadioSettings::gain` scales the finished output, so halving it is exactly 6 dB.
+`RadioAudio::gain` scales the finished output, so halving it is exactly 6 dB.
 
 ## Milestones
 

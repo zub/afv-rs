@@ -15,7 +15,7 @@ use crate::dsp::{Carrier, Compressor, HfChannel, HfConditions, RmsAgc};
 use crate::effects::{EffectSamples, SamplePlayer, Samples};
 use crate::radio::{Output, Radio, RadioSettings, RxChange, Signal};
 use crate::stream::RemoteStream;
-use crate::{FRAME_SAMPLES, Frame, SAMPLE_RATE};
+use crate::{FRAME_SAMPLES, Frame};
 
 /// Caller-chosen radio identifier.
 pub type RadioId = u32;
@@ -45,7 +45,7 @@ pub struct Bus {
     sounds: Vec<(SamplePlayer, f32)>,
     fetch: Box<Frame>,
     agc_enabled: bool,
-    agc_target_db: f64,
+    agc_target_db: f32,
     hf_conditions: HfConditions,
 }
 
@@ -93,7 +93,7 @@ impl Bus {
     }
 
     /// Per-talker AGC; applies to existing and future talkers.
-    pub fn set_agc(&mut self, enabled: bool, target_db: f64) {
+    pub fn set_agc(&mut self, enabled: bool, target_db: f32) {
         self.agc_enabled = enabled;
         self.agc_target_db = target_db;
         for t in self.talkers.values_mut() {
@@ -145,7 +145,7 @@ impl Bus {
                     carrier,
                     frame: Box::new([0.0; FRAME_SAMPLES]),
                     has_frame: false,
-                    speech_processor: Compressor::default_for_rate(SAMPLE_RATE),
+                    speech_processor: Compressor::new(),
                     hf: HfChannel::new(),
                     hf_frame: Box::new([0.0; FRAME_SAMPLES]),
                     on_hf: false,
@@ -169,18 +169,8 @@ impl Bus {
             .retain(|_, t| t.stream.last_packet_at().is_some_and(|at| now.saturating_duration_since(at) <= timeout));
     }
 
-    /// Renders one stereo frame. `on_rx` is told when a talker starts or stops being heard on
-    /// a radio.
-    pub fn render_stereo(&mut self, left: &mut Frame, right: &mut Frame, on_rx: impl FnMut(RadioId, &str, RxChange)) {
-        self.render(left, Some(right), on_rx);
-    }
-
-    /// Renders one mono frame, ignoring radio panning.
-    pub fn render_mono(&mut self, out: &mut Frame, on_rx: impl FnMut(RadioId, &str, RxChange)) {
-        self.render(out, None, on_rx);
-    }
-
-    /// Renders one frame, mono if `right` is `None`.
+    /// Renders one frame: stereo, or mono (ignoring radio panning) if `right` is `None`.
+    /// `on_rx` is told when a talker starts or stops being heard on a radio.
     pub fn render(
         &mut self,
         left: &mut Frame,

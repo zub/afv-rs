@@ -9,7 +9,7 @@
 //! settled instead of fully compressed. `reference.cpp` makes the same change to sndfilter's state.
 
 use afv_audio::dsp::{Compressor, RmsAgc};
-use afv_audio::{FRAME_SAMPLES, Frame, SAMPLE_RATE};
+use afv_audio::{FRAME_SAMPLES, Frame};
 
 fn load(name: &str) -> Vec<f32> {
     let path = format!("{}/tests/data/{name}", env!("CARGO_MANIFEST_DIR"));
@@ -48,7 +48,7 @@ fn assert_matches(name: &str, actual: &[f32], tolerance: f32) {
 #[test]
 fn compressor_matches_afv_native() {
     let input = load("input.f32");
-    let mut comp = Compressor::default_for_rate(SAMPLE_RATE);
+    let mut comp = Compressor::new();
     let out = per_frame(&input, |f| comp.process(f));
     assert_matches("compressor.f32", &out, 1e-5);
 }

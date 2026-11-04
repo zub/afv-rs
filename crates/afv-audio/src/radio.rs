@@ -19,14 +19,14 @@ const VHF_NOISE_GAIN: f32 = 0.17;
 const HF_NOISE_GAIN: f32 = 0.16;
 /// afv-native's weak-signal crackle on VHF: `e^d · d^POWER / DIVISOR − OFFSET` for a
 /// `DistanceRatio` d, clamped to 0‥MAX. OFFSET is e/350, so a full-strength signal has none.
-const CRACKLE_POWER: f64 = -4.0;
-const CRACKLE_DIVISOR: f64 = 350.0;
-const CRACKLE_OFFSET: f64 = 0.00776652;
+const CRACKLE_POWER: f32 = -4.0;
+const CRACKLE_DIVISOR: f32 = 350.0;
+const CRACKLE_OFFSET: f32 = 0.00776652;
 const CRACKLE_MAX: f32 = 0.20;
 /// The crackle recording plays at this multiple of the crackle amount…
 const CRACKLE_PLAYBACK_GAIN: f32 = 2.0;
 /// …and the voice is turned down by this multiple of it.
-const CRACKLE_VOICE_DUCKING: f64 = 3.7;
+const CRACKLE_VOICE_DUCKING: f32 = 3.7;
 /// Weakest carrier for the AM model, so that even a signal at the edge of range takes part.
 const CARRIER_LEVEL_FLOOR: f32 = 0.01;
 
@@ -39,13 +39,13 @@ pub enum Pan {
     Right,
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub struct RadioSettings {
-    /// Hz; 0 receives nothing.
-    pub frequency: u32,
+/// How a radio sounds: the settings that only the local audio needs.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RadioAudio {
     /// Volume, linear, applied after all of the simulation.
     pub gain: f32,
-    /// Simulate radio effects; `false` plays voice clean.
+    /// Simulate the radio: its set, noise, static and the squelch click. `false` plays voice
+    /// clean.
     pub effects: bool,
     /// HF radios have no squelch, so their background (noise, static, sounders) plays all the
     /// time; this silences it, and adds the squelch click at the end of a transmission.
@@ -54,23 +54,30 @@ pub struct RadioSettings {
     pub vhf_hardware: VhfHardware,
     /// …and the one heard on HF.
     pub hf_hardware: HfHardware,
+    /// Play nothing, but still report reception.
     pub muted: bool,
-    pub pan: Pan,
 }
 
-impl Default for RadioSettings {
+impl Default for RadioAudio {
     fn default() -> Self {
         Self {
-            frequency: 0,
             gain: 1.0,
             effects: true,
             hf_squelch: false,
             vhf_hardware: VhfHardware::default(),
             hf_hardware: HfHardware::default(),
             muted: false,
-            pan: Pan::Both,
         }
     }
+}
+
+/// Everything a [`Radio`] needs to know.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct RadioSettings {
+    /// Hz; 0 receives nothing.
+    pub frequency: u32,
+    pub pan: Pan,
+    pub audio: RadioAudio,
 }
 
 /// Reception started or ended on a radio.
@@ -97,9 +104,8 @@ fn carrier_level(distance_ratio: f32) -> f32 {
 }
 
 /// How much crackle a signal of this `DistanceRatio` gets (0 at full strength, up to [`CRACKLE_MAX`]).
-fn weak_signal_crackle(distance_ratio: f32) -> f32 {
-    let d = distance_ratio as f64;
-    let crackle = ((d.exp() * d.powf(CRACKLE_POWER) / CRACKLE_DIVISOR) - CRACKLE_OFFSET) as f32;
+fn weak_signal_crackle(d: f32) -> f32 {
+    let crackle = d.exp() * d.powf(CRACKLE_POWER) / CRACKLE_DIVISOR - CRACKLE_OFFSET;
     // fmax/fmin semantics as in the original: NaN maps to the bound, unlike `clamp`.
     #[allow(clippy::manual_clamp)]
     crackle.max(0.0).min(CRACKLE_MAX)
@@ -139,7 +145,8 @@ enum SetChoice {
 }
 
 fn set_choice(settings: &RadioSettings) -> SetChoice {
-    if is_hf(settings.frequency) { SetChoice::Hf(settings.hf_hardware) } else { SetChoice::Vhf(settings.vhf_hardware) }
+    let audio = &settings.audio;
+    if is_hf(settings.frequency) { SetChoice::Hf(audio.hf_hardware) } else { SetChoice::Vhf(audio.vhf_hardware) }
 }
 
 fn radio_set(settings: &RadioSettings) -> RadioSet {
@@ -250,7 +257,7 @@ impl Radio {
 
     /// Whether this radio applies HF propagation to what it hears.
     pub fn simulates_hf(&self) -> bool {
-        self.settings.effects && is_hf(self.settings.frequency)
+        self.settings.audio.effects && is_hf(self.settings.frequency)
     }
 
     /// Number of streams on the radio's frequency in the last processed frame, counted even while
@@ -292,7 +299,8 @@ impl Radio {
         effects: &EffectSamples,
         output: Output<'_>,
     ) {
-        let RadioSettings { frequency, gain, effects: fx_on, hf_squelch, muted, .. } = self.settings;
+        let RadioSettings { frequency, pan, audio } = self.settings;
+        let RadioAudio { gain, effects: fx_on, hf_squelch, muted, .. } = audio;
         let hf = is_hf(frequency);
         if self.transmitting {
             self.reset_effects();
@@ -321,10 +329,10 @@ impl Radio {
             match output {
                 Output::Mono(out) => mix(out, &self.channel, gain),
                 Output::Stereo { left, right } => {
-                    if self.settings.pan != Pan::Right {
+                    if pan != Pan::Right {
                         mix(left, &self.channel, gain);
                     }
-                    if self.settings.pan != Pan::Left {
+                    if pan != Pan::Left {
                         mix(right, &self.channel, gain);
                     }
                 }
@@ -353,7 +361,7 @@ impl Radio {
             let crackle = if fx_on && !hf { weak_signal_crackle(ratio) } else { 0.0 };
             crackle_gain += crackle * CRACKLE_PLAYBACK_GAIN;
             if audible {
-                let voice_gain = (1.0 - crackle as f64 * CRACKLE_VOICE_DUCKING) as f32;
+                let voice_gain = 1.0 - crackle * CRACKLE_VOICE_DUCKING;
                 mix(&mut self.channel, signal.audio, voice_gain);
                 if !hf {
                     self.am.add(signal.audio, voice_gain, carrier_level(ratio), signal.carrier);

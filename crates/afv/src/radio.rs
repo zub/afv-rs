@@ -6,7 +6,7 @@
 
 use afv_proto::api::{CrossCoupleGroup, StationTransceiver, Transceiver};
 
-pub use afv_audio::{HfHardware, Pan, VhfHardware};
+pub use afv_audio::{HfHardware, Pan, RadioAudio, VhfHardware};
 
 use crate::Frequency;
 
@@ -53,7 +53,7 @@ pub enum Sites {
     /// The client's own position (see `Client::set_position`).
     #[default]
     Own,
-    /// Fixed antenna sites, typically a station's from `Client::station_transceivers`.
+    /// Fixed antenna sites, typically a station's from [`crate::Session::station_transceivers`].
     Fixed(Vec<Site>),
 }
 
@@ -101,19 +101,10 @@ pub struct RadioConfig {
     pub tx: bool,
     pub coupling: Coupling,
     pub output: Output,
-    /// Output gain, linear.
-    pub gain: f32,
-    /// The set heard on VHF frequencies…
-    pub vhf_hardware: VhfHardware,
-    /// …and the one heard on HF.
-    pub hf_hardware: HfHardware,
-    /// Simulate static, noise and the radio's frequency response.
-    pub effects: bool,
-    /// Suppress HF background noise.
-    pub hf_squelch: bool,
-    /// Play nothing, but still report reception ([`crate::Event::RxStarted`]), e.g. for a
-    /// frequency only monitored on a panel.
-    pub muted: bool,
+    /// How it sounds: volume, the simulated radio set, effects, HF squelch and muting. A muted
+    /// radio still reports reception ([`crate::Event::RxStarted`]), e.g. for a frequency only
+    /// monitored on a panel.
+    pub audio: RadioAudio,
 }
 
 impl RadioConfig {
@@ -126,12 +117,7 @@ impl RadioConfig {
             tx: false,
             coupling: Coupling::None,
             output: Output::default(),
-            gain: 1.0,
-            vhf_hardware: VhfHardware::default(),
-            hf_hardware: HfHardware::default(),
-            effects: true,
-            hf_squelch: false,
-            muted: false,
+            audio: RadioAudio::default(),
         }
     }
 
@@ -147,16 +133,7 @@ impl RadioConfig {
 
     /// The local audio settings for this radio.
     pub(crate) fn audio_settings(&self) -> afv_audio::RadioSettings {
-        afv_audio::RadioSettings {
-            frequency: self.frequency.hz(),
-            gain: self.gain,
-            effects: self.effects,
-            hf_squelch: self.hf_squelch,
-            vhf_hardware: self.vhf_hardware,
-            hf_hardware: self.hf_hardware,
-            muted: self.muted,
-            pan: self.output.pan,
-        }
+        afv_audio::RadioSettings { frequency: self.frequency.hz(), pan: self.output.pan, audio: self.audio }
     }
 }
 
@@ -341,9 +318,9 @@ mod tests {
 
     #[test]
     fn muted_radios_keep_their_transceivers_and_tell_the_audio() {
-        let muted = RadioConfig { muted: true, ..RadioConfig::pilot(freq("122.800")) };
-        assert!(muted.audio_settings().muted);
-        assert!(!RadioConfig::pilot(freq("122.800")).audio_settings().muted);
+        let audio = RadioAudio { muted: true, ..RadioAudio::default() };
+        let muted = RadioConfig { audio, ..RadioConfig::pilot(freq("122.800")) };
+        assert_eq!(muted.audio_settings().audio, audio);
         assert_eq!(Plan::build([&muted], Some(POS)).transceivers.len(), 1);
     }
 

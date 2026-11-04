@@ -2,6 +2,7 @@
 
 use std::cell::RefCell;
 
+use num_traits::Float;
 use rand::SeedableRng;
 use rand::rngs::SmallRng;
 
@@ -22,10 +23,21 @@ pub use hardware::{HfHardware, RadioSet, VhfHardware};
 pub(crate) use hf::Atmospherics;
 pub use hf::{HfChannel, HfConditions};
 
+/// The amplitude ratio of `db` decibels.
+pub(crate) fn db_to_gain<F: Float + From<u8>>(db: F) -> F {
+    F::powf(10u8.into(), db / 20u8.into())
+}
+
+/// `e^(−step/time_constant)`: how much of its previous value a first-order smoother keeps after
+/// `step` (in the same unit as the time constant). One minus it is the share it moves.
+pub(crate) fn pole<F: Float>(step: F, time_constant: F) -> F {
+    (-step / time_constant).exp()
+}
+
 /// The unfaded voice level of a received stream (at the stream AGC's target), which background
 /// levels and the receivers' gain controls are set against.
 pub(crate) fn voice_rms() -> f32 {
-    10f32.powf(RmsAgc::DEFAULT_TARGET_DB as f32 / 20.0)
+    db_to_gain(RmsAgc::DEFAULT_TARGET_DB)
 }
 
 thread_local! {

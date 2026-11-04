@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use afv::radio::{OutputBus, Position, RadioConfig};
+use afv::radio::{OutputBus, Position, RadioAudio, RadioConfig};
 use afv::realtime::{self, Format};
 use afv::{Event, Events};
 use support::FakeServer;
@@ -34,7 +34,11 @@ async fn transmission_round_trips_through_the_bridge() {
     let client = server.client_builder().connect().await.unwrap();
     let mut events = client.events();
     client.set_position(POS);
-    client.add_radio(RadioConfig { tx: true, effects: false, ..RadioConfig::pilot("122.800".parse().unwrap()) });
+    client.add_radio(RadioConfig {
+        tx: true,
+        audio: RadioAudio { effects: false, ..RadioAudio::default() },
+        ..RadioConfig::pilot("122.800".parse().unwrap())
+    });
 
     let mic = Format { sample_rate: 44_100, channels: 1 };
     let speaker = Format { sample_rate: 48_000, channels: 2 };

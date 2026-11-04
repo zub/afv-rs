@@ -85,17 +85,13 @@ impl Api {
         Ok(self.http.request(method, self.url(path)).bearer_auth(token))
     }
 
+    /// Sends `req`; an unsuccessful status is an error.
     async fn send(&self, req: RequestBuilder, endpoint: &str) -> Result<Response> {
-        let resp = req.send().await?;
-        if !resp.status().is_success() {
-            return Err(status_error(endpoint, resp.status()));
-        }
-        Ok(resp)
+        successful(req.send().await?, endpoint)
     }
 
     async fn get_json<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
-        let resp = self.send(self.request(Method::GET, path)?, path).await?;
-        resp.json().await.map_err(|e| Error::InvalidResponse { endpoint: path.into(), message: e.to_string() })
+        json(self.send(self.request(Method::GET, path)?, path).await?, path).await
     }
 
     fn callsign_path(&self) -> String {
@@ -106,9 +102,7 @@ impl Api {
     pub(crate) async fn allocate_voice_session(&self) -> Result<VoiceServer> {
         let path = self.callsign_path();
         let resp = self.send(self.request(Method::POST, &path)?, &path).await?;
-        let body: PostCallsignResponse =
-            resp.json().await.map_err(|e| Error::InvalidResponse { endpoint: path, message: e.to_string() })?;
-        Ok(body.voice_server)
+        Ok(json::<PostCallsignResponse>(resp, &path).await?.voice_server)
     }
 
     pub(crate) async fn release_voice_session(&self) -> Result<()> {
@@ -133,10 +127,7 @@ impl Api {
         if resp.status() == StatusCode::NOT_FOUND {
             return Ok(None);
         }
-        if !resp.status().is_success() {
-            return Err(status_error(&path, resp.status()));
-        }
-        resp.json().await.map(Some).map_err(|e| Error::InvalidResponse { endpoint: path, message: e.to_string() })
+        json(successful(resp, &path)?, &path).await.map(Some)
     }
 
     pub(crate) async fn station_transceivers(&self, name: &str) -> Result<Vec<StationTransceiver>> {
@@ -154,4 +145,12 @@ impl Api {
 
 fn status_error(endpoint: &str, status: StatusCode) -> Error {
     Error::Status { endpoint: endpoint.into(), status: status.as_u16() }
+}
+
+fn successful(resp: Response, endpoint: &str) -> Result<Response> {
+    if resp.status().is_success() { Ok(resp) } else { Err(status_error(endpoint, resp.status())) }
+}
+
+async fn json<T: DeserializeOwned>(resp: Response, endpoint: &str) -> Result<T> {
+    resp.json().await.map_err(|e| Error::InvalidResponse { endpoint: endpoint.into(), message: e.to_string() })
 }

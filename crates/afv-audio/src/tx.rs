@@ -70,14 +70,6 @@ impl Transmitter {
         &self.frame
     }
 
-    /// Restarts the sequence counter and encoder, e.g. for a new voice session.
-    pub fn reset(&mut self) -> Result<(), OpusError> {
-        self.sequence = 0;
-        self.ptt = false;
-        self.sending = false;
-        self.encoder.reset()
-    }
-
     /// Feeds one 20 ms microphone frame. Every frame advances the sequence counter, whether
     /// or not anything is sent; returns the packet to send while PTT is pressed and for one
     /// frame after it is released.
@@ -107,43 +99,38 @@ impl Transmitter {
 /// the last 300 ms. Readings below 0.3 (−28 dBFS) show as 0.
 #[derive(Debug, Clone)]
 pub struct LevelMeter {
-    window: [f64; Self::WINDOW],
+    window: [f32; Self::WINDOW],
     next: usize,
-    average: f64,
 }
 
 impl LevelMeter {
     /// Frames averaged: 300 ms.
     const WINDOW: usize = 15;
     /// The bottom of the scale, in dBFS peak…
-    const FLOOR_DB: f64 = -40.0;
+    const FLOOR_DB: f32 = -40.0;
     /// …and readings below this fraction of it show as 0, so that background noise does not move
     /// the meter.
-    const CUTOFF: f64 = 0.30;
+    const CUTOFF: f32 = 0.30;
 
     fn new() -> Self {
-        Self { window: [0.0; Self::WINDOW], next: 0, average: 0.0 }
+        Self { window: [0.0; Self::WINDOW], next: 0 }
     }
 
     fn add(&mut self, frame: &Frame) {
-        let peak = frame.iter().fold(0f32, |m, s| m.max(s.abs())) as f64;
+        let peak = frame.iter().fold(0f32, |m, s| m.max(s.abs()));
         let db = (20.0 * peak.log10()).clamp(Self::FLOOR_DB, 0.0);
-        let mut ratio = (db - Self::FLOOR_DB) / -Self::FLOOR_DB;
-        if ratio < Self::CUTOFF {
-            ratio = 0.0;
-        }
-        self.average += (ratio - self.window[self.next]) / Self::WINDOW as f64;
-        self.window[self.next] = ratio;
+        let ratio = (db - Self::FLOOR_DB) / -Self::FLOOR_DB;
+        self.window[self.next] = if ratio < Self::CUTOFF { 0.0 } else { ratio };
         self.next = (self.next + 1) % Self::WINDOW;
     }
 
     /// Average level.
-    pub fn level(&self) -> f64 {
-        self.average.max(0.0)
+    pub fn level(&self) -> f32 {
+        self.window.iter().sum::<f32>() / Self::WINDOW as f32
     }
 
     /// Highest level in the window.
-    pub fn peak(&self) -> f64 {
-        self.window.iter().copied().fold(0.0, f64::max)
+    pub fn peak(&self) -> f32 {
+        self.window.iter().copied().fold(0.0, f32::max)
     }
 }

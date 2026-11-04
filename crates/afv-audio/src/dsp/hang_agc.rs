@@ -4,7 +4,7 @@
 //! [`hardware`](super::hardware), which follows the Marconi 915 airborne HF transceiver's data
 //! sheet (at most 12 ms attack and 1.5 s recovery).
 
-use super::voice_rms;
+use super::{db_to_gain, pole, voice_rms};
 use crate::SAMPLE_RATE;
 
 /// The gain is set this far ahead of the audio (2 ms), so that it can start down before a crash.
@@ -34,7 +34,13 @@ pub(crate) struct HangTiming {
 /// down for a moment, as on a real set.
 #[derive(Debug, Clone)]
 pub(crate) struct HangAgc {
-    timing: HangTiming,
+    target_peak: f32,
+    /// Per sample: the share of the way to a lower gain the attack moves…
+    attack: f32,
+    /// …the samples it then holds…
+    hang_samples: u32,
+    /// …and the factor it rises by after that, up to `max_gain`.
+    decay: f32,
     max_gain: f32,
     gain: f32,
     hang: u32,
@@ -44,8 +50,20 @@ pub(crate) struct HangAgc {
 
 impl HangAgc {
     pub(crate) fn new(timing: HangTiming) -> Self {
-        let max_gain = timing.target_peak / (VOICE_CREST * voice_rms()) * 10f32.powf(timing.range_db / 20.0);
-        Self { timing, max_gain, gain: max_gain, hang: 0, delay: Box::new([0.0; LOOKAHEAD]), cursor: 0 }
+        let HangTiming { attack_s, hang_s, decay_db_per_s, target_peak, range_db } = timing;
+        let rate = SAMPLE_RATE as f32;
+        let max_gain = target_peak / (VOICE_CREST * voice_rms()) * db_to_gain(range_db);
+        Self {
+            target_peak,
+            attack: 1.0 - pole(1.0, attack_s * rate),
+            hang_samples: (hang_s * rate) as u32,
+            decay: db_to_gain(decay_db_per_s / rate),
+            max_gain,
+            gain: max_gain,
+            hang: 0,
+            delay: Box::new([0.0; LOOKAHEAD]),
+            cursor: 0,
+        }
     }
 
     /// Back to full gain with nothing in flight, as after transmitting.
@@ -55,19 +73,15 @@ impl HangAgc {
     }
 
     pub(crate) fn process(&mut self, samples: &mut [f32]) {
-        let HangTiming { attack_s, hang_s, decay_db_per_s, target_peak, .. } = self.timing;
-        let attack = 1.0 - (-1.0 / (attack_s * SAMPLE_RATE as f32)).exp();
-        let decay = 10f32.powf(decay_db_per_s / 20.0 / SAMPLE_RATE as f32);
-        let hang = (hang_s * SAMPLE_RATE as f32) as u32;
         for s in samples {
             let ahead = s.abs();
-            if ahead * self.gain > target_peak {
-                self.gain += (target_peak / ahead - self.gain) * attack;
-                self.hang = hang;
+            if ahead * self.gain > self.target_peak {
+                self.gain += (self.target_peak / ahead - self.gain) * self.attack;
+                self.hang = self.hang_samples;
             } else if self.hang > 0 {
                 self.hang -= 1;
             } else {
-                self.gain = (self.gain * decay).min(self.max_gain);
+                self.gain = (self.gain * self.decay).min(self.max_gain);
             }
             let delayed = std::mem::replace(&mut self.delay[self.cursor], *s);
             self.cursor = (self.cursor + 1) % LOOKAHEAD;

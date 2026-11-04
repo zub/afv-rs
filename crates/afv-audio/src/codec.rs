@@ -26,10 +26,6 @@ impl Encoder {
         let len = self.inner.encode_float(frame, &mut self.buffer[..])?;
         Ok(&self.buffer[..len])
     }
-
-    pub fn reset(&mut self) -> Result<(), OpusError> {
-        self.inner.reset_state()
-    }
 }
 
 pub struct Decoder {

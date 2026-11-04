@@ -4,8 +4,8 @@ use std::time::{Duration, Instant};
 use afv_audio::codec::{Decoder, Encoder};
 use afv_audio::radio::{Output, Signal};
 use afv_audio::{
-    Bus, Carrier, EffectSamples, FRAME_SAMPLES, Frame, HfConditions, Pan, Radio, RadioSettings, RxChange, Transmitter,
-    VhfHardware,
+    Bus, Carrier, EffectSamples, FRAME_SAMPLES, Frame, HfConditions, Pan, Radio, RadioAudio, RadioSettings, RxChange,
+    Transmitter, VhfHardware,
 };
 use afv_proto::voice::RxTransceiver;
 
@@ -37,8 +37,16 @@ fn rx(frequency: u32, distance_ratio: f32) -> Vec<RxTransceiver> {
     vec![RxTransceiver { id: 0, frequency, distance_ratio }]
 }
 
+fn with(frequency: u32, audio: RadioAudio) -> RadioSettings {
+    RadioSettings { frequency, audio, ..RadioSettings::default() }
+}
+
+fn clean_audio() -> RadioAudio {
+    RadioAudio { effects: false, ..RadioAudio::default() }
+}
+
 fn clean(frequency: u32) -> RadioSettings {
-    RadioSettings { frequency, effects: false, ..RadioSettings::default() }
+    with(frequency, clean_audio())
 }
 
 #[test]
@@ -102,7 +110,7 @@ fn process(radio: &mut Radio, streams: &[(&Frame, &[RxTransceiver])], fx: &Effec
 fn radio_without_effects_passes_matching_voice_only() {
     let fx = EffectSamples::default();
     let voice = sine(0, 440.0, 0.4);
-    let mut radio = Radio::new(RadioSettings { gain: 0.5, ..clean(FREQ) });
+    let mut radio = Radio::new(with(FREQ, RadioAudio { gain: 0.5, ..clean_audio() }));
 
     let (l, r, receiving) = process(&mut radio, &[(&voice, &rx(FREQ, 1.0))], &fx);
     assert_eq!(receiving, 1);
@@ -124,7 +132,7 @@ fn radio_pan_mute_and_transmit() {
     let (l, r, _) = process(&mut radio, &streams, &fx);
     assert!(rms(&l) > 0.1 && rms(&r) == 0.0);
 
-    let mut radio = Radio::new(RadioSettings { muted: true, ..clean(FREQ) });
+    let mut radio = Radio::new(with(FREQ, RadioAudio { muted: true, ..clean_audio() }));
     let (l, _, receiving) = process(&mut radio, &streams, &fx);
     assert_eq!((rms(&l), receiving), (0.0, 1), "muted radios still detect reception");
 
@@ -168,7 +176,7 @@ fn effects_add_noise_and_click() {
     let ones: Arc<[f32]> = vec![1.0; 4800].into();
     let fx = EffectSamples { vhf_noise: Some(ones.clone()), click: Some(ones), ..EffectSamples::default() };
     let silence = [0.0; FRAME_SAMPLES];
-    let mut radio = Radio::new(RadioSettings { frequency: FREQ, gain: 2.0, ..RadioSettings::default() });
+    let mut radio = Radio::new(with(FREQ, RadioAudio { gain: 2.0, ..RadioAudio::default() }));
 
     // Silent voice: the output is the VHF noise bed alone, 0.17 × gain.
     let (l, _, _) = process(&mut radio, &[(&silence, &rx(FREQ, 1.0))], &fx);
@@ -185,7 +193,7 @@ fn weak_signals_sound_quieter_and_use_the_strongest_transceiver() {
     let fx = EffectSamples::default();
     let settings = RadioSettings { frequency: FREQ, ..RadioSettings::default() };
     let level = |transceivers: &[RxTransceiver]| {
-        let mut radio = Radio::new(settings.clone());
+        let mut radio = Radio::new(settings);
         let mut total = 0.0;
         for i in 0..20 {
             let voice = sine(i, 440.0, 0.3);
@@ -225,7 +233,7 @@ fn bus_plays_a_received_transmission_end_to_end() {
         if let Some(p) = tx.process(&sine(i, 440.0, 0.3)).unwrap() {
             bus.push("SAS123", p.sequence, p.opus, p.last_packet, &rx(FREQ, 1.0), now).unwrap();
         }
-        bus.render_stereo(&mut l, &mut r, |id, callsign, c| changes.push((i, id, callsign.to_owned(), c)));
+        bus.render(&mut l, Some(&mut r), |id, callsign, c| changes.push((i, id, callsign.to_owned(), c)));
         if rms(&l) > 0.05 {
             loud_frames += 1;
         }
@@ -266,7 +274,7 @@ fn bus_reports_each_talker_per_radio() {
             // Transmitting on radio 1 stops reception there.
             bus.set_transmitting(1, true);
         }
-        bus.render_stereo(&mut l, &mut r, |id, callsign, c| events.push((id, callsign.to_owned(), c)));
+        bus.render(&mut l, Some(&mut r), |id, callsign, c| events.push((id, callsign.to_owned(), c)));
     }
     let started: Vec<_> = events.iter().filter(|e| e.2 == RxChange::Started).map(|e| (e.0, &*e.1)).collect();
     let ended: Vec<_> = events.iter().filter(|e| e.2 == RxChange::Ended).map(|e| (e.0, &*e.1)).collect();
@@ -305,7 +313,7 @@ fn transmitting_mid_reception_neither_clicks_nor_loses_the_talker() {
 fn bus_ends_and_resumes_reception_around_our_own_transmission() {
     let mut bus = Bus::new(EffectSamples::default());
     bus.set_radio(1, clean(FREQ));
-    bus.set_radio(2, RadioSettings { muted: true, ..clean(FREQ) });
+    bus.set_radio(2, with(FREQ, RadioAudio { muted: true, ..clean_audio() }));
     let mut tx = Transmitter::new().unwrap();
     tx.set_ptt(true);
     let start = Instant::now();
@@ -328,7 +336,7 @@ fn bus_ends_and_resumes_reception_around_our_own_transmission() {
         }
         let transmitting = (20..30).contains(&i);
         bus.set_transmitting(1, transmitting);
-        bus.render_stereo(&mut l, &mut r, |id, _, c| events.push((i, id, c)));
+        bus.render(&mut l, Some(&mut r), |id, _, c| events.push((i, id, c)));
         if transmitting {
             assert_eq!(rms(&l), 0.0, "radio 1 transmits and radio 2 is muted (frame {i})");
         }
@@ -349,9 +357,9 @@ fn bus_mono_ignores_pan_and_plays_sounds() {
     let mut bus = Bus::new(EffectSamples::default());
     bus.play_sound(vec![0.5; 100].into(), 2.0);
     let mut out = [0.0; FRAME_SAMPLES];
-    bus.render_mono(&mut out, |_, _, _| {});
+    bus.render(&mut out, None, |_, _, _| {});
     assert_eq!((out[0], out[99], out[100]), (1.0, 1.0, 0.0));
-    bus.render_mono(&mut out, |_, _, _| {});
+    bus.render(&mut out, None, |_, _, _| {});
     assert_eq!(out[0], 0.0);
 }
 
@@ -379,7 +387,7 @@ fn render_one(callsign: &str, frequency: u32, radio: RadioSettings, conditions: 
             start + Duration::from_millis(20 * i as u64),
         )
         .unwrap();
-        bus.render_mono(&mut frame, |_, _, _| {});
+        bus.render(&mut frame, None, |_, _, _| {});
         out.extend_from_slice(&frame);
     }
     out.split_off(20 * FRAME_SAMPLES)
@@ -395,18 +403,19 @@ fn hf_propagation_shifts_voice_on_hf_radios_with_effects() {
         |out: &[f32]| (850..=1150).max_by(|&a, &b| tone(out, a as f64).total_cmp(&tone(out, b as f64))).unwrap();
 
     afv_audio::dsp::seed_rng(1);
-    let shifted = strongest(&render_one("SAS123", HF, radio.clone(), conditions));
+    let shifted = strongest(&render_one("SAS123", HF, radio, conditions));
     assert!((shifted - 1000i32).abs() > 20, "the 1 kHz tone comes out at {shifted} Hz");
 
     afv_audio::dsp::seed_rng(1);
-    let clean = strongest(&render_one("SAS123", HF, RadioSettings { effects: false, ..radio }, conditions));
+    let clean =
+        strongest(&render_one("SAS123", HF, with(HF, RadioAudio { effects: false, ..radio.audio }), conditions));
     assert_eq!(clean, 1000, "effects off");
 }
 
 #[test]
 fn vhf_is_untouched_by_hf_conditions() {
     let radio = RadioSettings { frequency: FREQ, ..RadioSettings::default() };
-    let poor = render_one("SAS123", FREQ, radio.clone(), HfConditions::POOR);
+    let poor = render_one("SAS123", FREQ, radio, HfConditions::POOR);
     let off = render_one("SAS123", FREQ, radio, HfConditions::OFF);
     assert_eq!(poor, off);
 }
@@ -425,13 +434,21 @@ fn hf_radios_hear_their_background_all_the_time() {
         (0..100).map(|_| process(&mut radio, streams, &fx).0).fold(0f32, |m, l| l.iter().fold(m, |m, s| m.max(s.abs())))
     };
     let hf = RadioSettings { frequency: HF, ..RadioSettings::default() };
-    assert!(peak_over(hf.clone(), true, false) > 0.05, "while receiving");
-    assert!(peak_over(hf.clone(), false, false) > 0.05, "and with nobody transmitting: HF has no squelch");
-    assert_eq!(peak_over(hf.clone(), false, true), 0.0, "silent while transmitting");
-    assert_eq!(peak_over(RadioSettings { muted: true, ..hf.clone() }, false, false), 0.0, "muted");
+    assert!(peak_over(hf, true, false) > 0.05, "while receiving");
+    assert!(peak_over(hf, false, false) > 0.05, "and with nobody transmitting: HF has no squelch");
+    assert_eq!(peak_over(hf, false, true), 0.0, "silent while transmitting");
+    assert_eq!(peak_over(with(HF, RadioAudio { muted: true, ..hf.audio }), false, false), 0.0, "muted");
     for receiving in [true, false] {
-        assert_eq!(peak_over(RadioSettings { hf_squelch: true, ..hf.clone() }, receiving, false), 0.0, "HF squelch");
-        assert_eq!(peak_over(RadioSettings { effects: false, ..hf.clone() }, receiving, false), 0.0, "effects off");
+        assert_eq!(
+            peak_over(with(HF, RadioAudio { hf_squelch: true, ..hf.audio }), receiving, false),
+            0.0,
+            "HF squelch"
+        );
+        assert_eq!(
+            peak_over(with(HF, RadioAudio { effects: false, ..hf.audio }), receiving, false),
+            0.0,
+            "effects off"
+        );
     }
     let vhf = RadioSettings { frequency: FREQ, ..RadioSettings::default() };
     assert_eq!(peak_over(vhf, false, false), 0.0, "VHF stays squelched");
@@ -443,7 +460,7 @@ fn hf_radios_do_not_click_at_the_end_of_a_transmission() {
     let fx = EffectSamples { click: Some(ones), ..EffectSamples::default() };
     let silence = [0.0; FRAME_SAMPLES];
     let end = |squelch: bool| {
-        let mut radio = Radio::new(RadioSettings { frequency: HF, hf_squelch: squelch, ..RadioSettings::default() });
+        let mut radio = Radio::new(with(HF, RadioAudio { hf_squelch: squelch, ..RadioAudio::default() }));
         radio.set_hf_conditions(HfConditions::OFF);
         process(&mut radio, &[(&silence, &rx(HF, 1.0))], &fx);
         let (l, _, receiving) = process(&mut radio, &[], &fx);
@@ -505,7 +522,7 @@ fn hf_radios_hear_through_the_hfs900d() {
 #[test]
 fn the_vhf_set_never_colours_hf() {
     let render = |vhf_hardware| {
-        let mut r = radio(RadioSettings { frequency: HF, vhf_hardware, ..RadioSettings::default() });
+        let mut r = radio(with(HF, RadioAudio { vhf_hardware, ..RadioAudio::default() }));
         frames(&mut r, 0, 30, |i| sine(i, 700.0, 0.4))
     };
     let schmid = render(VhfHardware::SchmidEd137b);
@@ -516,7 +533,7 @@ fn the_vhf_set_never_colours_hf() {
 #[test]
 fn the_hf_agc_holds_the_level_and_the_volume_comes_after_it() {
     let level = |amplitude: f32, gain: f32| {
-        let mut r = radio(RadioSettings { frequency: HF, gain, ..RadioSettings::default() });
+        let mut r = radio(with(HF, RadioAudio { gain, ..RadioAudio::default() }));
         let out = frames(&mut r, 0, 50, |i| sine(i, 1000.0, amplitude));
         tone(&out[24_000..], 1000.0)
     };
@@ -543,10 +560,10 @@ fn retuning_across_bands_switches_the_set() {
     let voice = |i| sine(i, 700.0, 0.6);
     let mut r = radio(RadioSettings { frequency: FREQ, ..RadioSettings::default() });
     frames(&mut r, 0, 50, voice);
-    r.set_settings(RadioSettings { frequency: HF, ..r.settings().clone() });
+    r.set_settings(RadioSettings { frequency: HF, ..*r.settings() });
     assert_eq!(frames(&mut r, 50, 50, voice), frames(&mut hf_radio(), 50, 50, voice));
     assert!(relative_db(&mut r, 2900.0) < -35.0, "the HF set");
-    r.set_settings(RadioSettings { frequency: FREQ, ..r.settings().clone() });
+    r.set_settings(RadioSettings { frequency: FREQ, ..*r.settings() });
     assert!(relative_db(&mut r, 2900.0) > -20.0, "back to the VHF set");
 }
 
@@ -568,7 +585,7 @@ fn hf_radios_play_each_kind_of_background() {
     let only_noise = HfConditions { noise_level: 0.5, ..HfConditions::OFF };
     let only_sounders = HfConditions { sounder_rate_hz: 5.0, sounder_level: 1.0, ..HfConditions::OFF };
     let output = |conditions: HfConditions, squelch: bool| {
-        let mut radio = Radio::new(RadioSettings { frequency: HF, hf_squelch: squelch, ..RadioSettings::default() });
+        let mut radio = Radio::new(with(HF, RadioAudio { hf_squelch: squelch, ..RadioAudio::default() }));
         radio.set_hf_conditions(conditions);
         let (fx, silence, transceivers) = (EffectSamples::default(), [0.0; FRAME_SAMPLES], rx(HF, 1.0));
         (0..250).flat_map(|_| process(&mut radio, &[(&silence, &transceivers)], &fx).0).collect::<Vec<f32>>()

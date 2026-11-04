@@ -27,9 +27,9 @@
 
 use super::biquad::{self, Biquad, Cascade};
 use super::compressor::Compressor;
+use super::db_to_gain;
 use super::hang_agc::{HangAgc, HangTiming};
 use super::limiter::PeakLimiter;
-use crate::SAMPLE_RATE;
 
 /// The VHF set whose sound is simulated. The audio responses are afv-native's three presets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
@@ -230,7 +230,7 @@ fn a_weighting(freq: f64) -> f64 {
     let f2 = freq * freq;
     let (a, b, c, d) = (20.6f64.powi(2), 107.7f64.powi(2), 737.9f64.powi(2), 12_194f64.powi(2));
     let r = d * f2 * f2 / ((f2 + a) * ((f2 + b) * (f2 + c)).sqrt() * (f2 + d));
-    (r * 10f64.powf(2.0 / 20.0)).powi(2)
+    (r * db_to_gain(2.0)).powi(2)
 }
 
 /// A response as heard by speech: its power gain averaged over the speech spectrum, each
@@ -290,7 +290,7 @@ impl RadioSet {
     fn new(spec: &Spec) -> Self {
         let (response, response_gain) = spec.response();
         let gain_control = match spec.gain_control {
-            GainControlSpec::Compressor => GainControl::Compressor(Compressor::default_for_rate(SAMPLE_RATE)),
+            GainControlSpec::Compressor => GainControl::Compressor(Compressor::new()),
             GainControlSpec::Hang(timing) => GainControl::Hang(HangAgc::new(timing)),
         };
         Self {
@@ -327,6 +327,7 @@ impl RadioSet {
 
 #[cfg(test)]
 mod tests {
+    use crate::SAMPLE_RATE;
     use rand::{RngExt, SeedableRng};
 
     use super::*;

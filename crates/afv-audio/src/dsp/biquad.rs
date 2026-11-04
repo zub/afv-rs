@@ -168,6 +168,7 @@ impl<const N: usize> Cascade<N> {
         cascade
     }
 
+    #[cfg(test)]
     /// A `low`–`high` Hz band-pass whose skirts are each of order `N` (`N` even): Butterworth for
     /// `ripple_db` 0, where the edges are at −3 dB, otherwise Chebyshev with that much passband
     /// ripple, the edges being where the ripple band ends. Each Chebyshev skirt ripples between

@@ -4,6 +4,7 @@
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{FromSample, SampleFormat, SizedSample};
+use tokio::sync::broadcast;
 
 use crate::audio::Audio;
 use crate::events::Event;
@@ -111,12 +112,15 @@ pub fn attach(audio: &Audio, config: DeviceConfig) -> Result<Devices, DeviceErro
     let formats: Vec<_> = outputs.iter().map(|(bus, _, c)| (*bus, format(c))).collect();
     let (bridge, capture, playback) = realtime::bridge(audio, input_config.as_ref().map(format), &formats);
 
+    // Device errors are reported straight to the event stream: the callback that reports them
+    // must not wait for the audio engine.
+    let events = audio.event_sender();
     let mut streams = Vec::new();
     if let (Some(device), Some(supported), Some(capture)) = (&input, &input_config, capture) {
-        streams.push(build_input(device, supported, capture, audio)?);
+        streams.push(build_input(device, supported, capture, &events)?);
     }
     for ((_, device, supported), playback) in outputs.iter().zip(playback) {
-        streams.push(build_output(device, supported, playback, audio)?);
+        streams.push(build_output(device, supported, playback, &events)?);
     }
     for stream in &streams {
         stream.play()?;
@@ -124,67 +128,64 @@ pub fn attach(audio: &Audio, config: DeviceConfig) -> Result<Devices, DeviceErro
     Ok(Devices { _streams: streams, _bridge: bridge })
 }
 
-fn report(audio: &Audio) -> impl FnMut(cpal::Error) + Send + 'static {
-    let audio = audio.clone();
+fn report(events: &broadcast::Sender<Event>) -> impl FnMut(cpal::Error) + Send + 'static {
+    let events = events.clone();
     move |e| {
         tracing::warn!("audio device: {e}");
-        audio.emit(Event::DeviceError(e.to_string()));
+        let _ = events.send(Event::DeviceError(e.to_string()));
     }
+}
+
+/// Calls `build::<T>(args…)` with `T` the sample type of `format`.
+macro_rules! with_sample_type {
+    ($format:expr, $build:ident($($arg:expr),*)) => {
+        match $format {
+            SampleFormat::F32 => $build::<f32>($($arg),*),
+            SampleFormat::F64 => $build::<f64>($($arg),*),
+            SampleFormat::I16 => $build::<i16>($($arg),*),
+            SampleFormat::I32 => $build::<i32>($($arg),*),
+            SampleFormat::U16 => $build::<u16>($($arg),*),
+            SampleFormat::U8 => $build::<u8>($($arg),*),
+            other => Err(DeviceError::Format(other)),
+        }
+    };
 }
 
 fn build_input(
     device: &cpal::Device,
     supported: &cpal::SupportedStreamConfig,
     capture: Capture,
-    audio: &Audio,
+    events: &broadcast::Sender<Event>,
 ) -> Result<cpal::Stream, DeviceError> {
     fn build<T: SizedSample>(
         device: &cpal::Device,
         config: cpal::StreamConfig,
         mut capture: Capture,
-        audio: &Audio,
+        events: &broadcast::Sender<Event>,
     ) -> Result<cpal::Stream, DeviceError>
     where
         f32: FromSample<T>,
     {
         let data = move |data: &[T], _: &cpal::InputCallbackInfo| capture.push_map(data, |s| s.to_sample());
-        Ok(device.build_input_stream(config, data, report(audio), None)?)
+        Ok(device.build_input_stream(config, data, report(events), None)?)
     }
-    let config = supported.config();
-    match supported.sample_format() {
-        SampleFormat::F32 => build::<f32>(device, config, capture, audio),
-        SampleFormat::F64 => build::<f64>(device, config, capture, audio),
-        SampleFormat::I16 => build::<i16>(device, config, capture, audio),
-        SampleFormat::I32 => build::<i32>(device, config, capture, audio),
-        SampleFormat::U16 => build::<u16>(device, config, capture, audio),
-        SampleFormat::U8 => build::<u8>(device, config, capture, audio),
-        other => Err(DeviceError::Format(other)),
-    }
+    with_sample_type!(supported.sample_format(), build(device, supported.config(), capture, events))
 }
 
 fn build_output(
     device: &cpal::Device,
     supported: &cpal::SupportedStreamConfig,
     playback: Playback,
-    audio: &Audio,
+    events: &broadcast::Sender<Event>,
 ) -> Result<cpal::Stream, DeviceError> {
     fn build<T: SizedSample + FromSample<f32>>(
         device: &cpal::Device,
         config: cpal::StreamConfig,
         mut playback: Playback,
-        audio: &Audio,
+        events: &broadcast::Sender<Event>,
     ) -> Result<cpal::Stream, DeviceError> {
         let data = move |data: &mut [T], _: &cpal::OutputCallbackInfo| playback.fill_map(data, T::from_sample);
-        Ok(device.build_output_stream(config, data, report(audio), None)?)
+        Ok(device.build_output_stream(config, data, report(events), None)?)
     }
-    let config = supported.config();
-    match supported.sample_format() {
-        SampleFormat::F32 => build::<f32>(device, config, playback, audio),
-        SampleFormat::F64 => build::<f64>(device, config, playback, audio),
-        SampleFormat::I16 => build::<i16>(device, config, playback, audio),
-        SampleFormat::I32 => build::<i32>(device, config, playback, audio),
-        SampleFormat::U16 => build::<u16>(device, config, playback, audio),
-        SampleFormat::U8 => build::<u8>(device, config, playback, audio),
-        other => Err(DeviceError::Format(other)),
-    }
+    with_sample_type!(supported.sample_format(), build(device, supported.config(), playback, events))
 }

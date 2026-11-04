@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use afv::proto::api::CrossCoupleGroup;
 use afv::proto::voice::{AudioRx, RxTransceiver};
-use afv::radio::{Coupling, Output, OutputBus, Position, RadioConfig, Site, Sites};
+use afv::radio::{Coupling, Output, OutputBus, Position, RadioAudio, RadioConfig, Site, Sites};
 use afv::{Event, Events, Frequency, SessionState, Timing};
 use afv_audio::codec::Encoder;
 use support::{FakeServer, eventually, fast_timing};
@@ -227,7 +227,10 @@ async fn received_audio_is_played_and_reported_per_radio() {
     let client = server.client_builder().connect().await.unwrap();
     let mut events = client.events();
     client.set_position(POS);
-    let com1 = client.add_radio(RadioConfig { effects: false, ..RadioConfig::pilot(freq("122.800")) });
+    let com1 = client.add_radio(RadioConfig {
+        audio: RadioAudio { effects: false, ..RadioAudio::default() },
+        ..RadioConfig::pilot(freq("122.800"))
+    });
     let speaker = client.add_radio(RadioConfig {
         output: Output { bus: OutputBus::Speaker, ..Output::default() },
         ..RadioConfig::pilot(freq("122.800"))

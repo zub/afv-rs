@@ -13,7 +13,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use afv_audio::{Bus, EffectSamples, FRAME_SAMPLES, HfConditions, RadioSettings, Transmitter, VhfHardware};
+use afv_audio::{Bus, EffectSamples, FRAME_SAMPLES, HfConditions, RadioAudio, RadioSettings, Transmitter, VhfHardware};
 use afv_proto::voice::RxTransceiver;
 
 const VHF: u32 = 118_500_000;
@@ -48,7 +48,14 @@ fn render(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut bus = Bus::new(EffectSamples::default());
     bus.set_hf_conditions(hf);
-    bus.set_radio(1, RadioSettings { frequency, vhf_hardware, ..RadioSettings::default() });
+    bus.set_radio(
+        1,
+        RadioSettings {
+            frequency,
+            audio: RadioAudio { vhf_hardware, ..RadioAudio::default() },
+            ..RadioSettings::default()
+        },
+    );
     let mut txs = talkers.iter().map(|_| Transmitter::new()).collect::<Result<Vec<_>, _>>()?;
     let tail = if frequency < 30_000_000 { HF_TAIL_FRAMES } else { VHF_TAIL_FRAMES };
     let frames = talkers.iter().map(|t| t.start_frame + t.audio.len() / FRAME_SAMPLES + 2).max().unwrap_or(0) + tail;
@@ -77,7 +84,7 @@ fn render(
                 bus.push(t.callsign, p.sequence, p.opus, p.last_packet, &rx, now)?;
             }
         }
-        bus.render_stereo(&mut l, &mut r, |_, _, _| {});
+        bus.render(&mut l, Some(&mut r), |_, _, _| {});
         for s in l {
             wav.write_sample((s.clamp(-1.0, 1.0) * 32767.0) as i16)?;
         }

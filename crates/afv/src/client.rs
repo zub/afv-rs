@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use afv_audio::EffectSamples;
-use afv_proto::api::{CrossCoupleGroup, Station, StationTransceiver};
+use afv_proto::api::CrossCoupleGroup;
 use tokio::sync::{Notify, broadcast, watch};
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, sleep, sleep_until};
@@ -140,6 +140,12 @@ impl Client {
         self.session.callsign()
     }
 
+    /// The network session underneath, e.g. for station lookups
+    /// ([`Session::station_transceivers`]).
+    pub fn session(&self) -> &Session {
+        &self.session
+    }
+
     pub fn state(&self) -> SessionState {
         self.session.state()
     }
@@ -223,26 +229,6 @@ impl Client {
     /// Whether audio is being transmitted.
     pub fn ptt_open(&self) -> bool {
         self.inner.lock().ptt_open
-    }
-
-    /// Looks up a station by name; `None` if it does not exist.
-    pub async fn station(&self, name: &str) -> Result<Option<Station>> {
-        self.session.station(name).await
-    }
-
-    /// A station's antenna sites; see [`crate::radio::Sites::from_station`].
-    pub async fn station_transceivers(&self, name: &str) -> Result<Vec<StationTransceiver>> {
-        self.session.station_transceivers(name).await
-    }
-
-    /// The VCCS panel of a station, in panel order.
-    pub async fn vccs(&self, name: &str) -> Result<Vec<Station>> {
-        self.session.vccs(name).await
-    }
-
-    /// Stations with a frequency alias.
-    pub async fn aliased_stations(&self) -> Result<Vec<Station>> {
-        self.session.aliased_stations().await
     }
 
     /// Stops transmitting, closes the voice link and releases the callsign on the server.

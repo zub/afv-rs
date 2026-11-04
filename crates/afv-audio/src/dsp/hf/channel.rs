@@ -18,14 +18,16 @@
 //!   ([calhoun.nps.edu](https://calhoun.nps.edu/entities/publication/f341cc35-61c1-484b-a130-bbc41fa9e149)):
 //!   errors of 20–30 Hz are already noticeable.
 
+use std::f64::consts::TAU;
 use std::ops::RangeInclusive;
 
+use num_complex::Complex64;
 use rand::RngExt;
 use rand::rngs::SmallRng;
 use rand_distr::StandardNormal;
 
 use super::HfConditions;
-use crate::dsp::with_rng;
+use crate::dsp::{db_to_gain, pole, with_rng};
 use crate::{FRAME_SAMPLES, Frame, SAMPLE_RATE};
 
 const FRAME_SECONDS: f64 = FRAME_SAMPLES as f64 / SAMPLE_RATE as f64;
@@ -94,14 +96,8 @@ impl Hilbert {
     }
 }
 
-type Complex = (f64, f64);
-
-fn mul(a: Complex, b: Complex) -> Complex {
-    (a.0 * b.0 - a.1 * b.1, a.0 * b.1 + a.1 * b.0)
-}
-
-fn lerp(a: Complex, b: Complex, t: f64) -> Complex {
-    (a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t)
+fn lerp(a: Complex64, b: Complex64, t: f64) -> Complex64 {
+    a + (b - a) * t
 }
 
 /// The complex gain of one propagation path (Watterson et al. 1970): a steady component plus a
@@ -114,7 +110,7 @@ struct Path {
     /// Phases in turns.
     phases: [f64; SINUSOIDS],
     /// The steady component, a unit phasor.
-    steady: Complex,
+    steady: Complex64,
 }
 
 impl Path {
@@ -125,8 +121,8 @@ impl Path {
         let rms = (doppler.iter().map(|f| f * f).sum::<f64>() / SINUSOIDS as f64).sqrt();
         doppler.iter_mut().for_each(|f| *f /= rms);
         let phases = std::array::from_fn(|_| rng.random::<f64>());
-        let angle = std::f64::consts::TAU * rng.random::<f64>();
-        Self { doppler, phases, steady: (angle.cos(), angle.sin()) }
+        let steady = Complex64::cis(TAU * rng.random::<f64>());
+        Self { doppler, phases, steady }
     }
 
     /// Moves on by `seconds` with a Doppler spread (2σ) of `spread_hz`.
@@ -138,13 +134,10 @@ impl Path {
     }
 
     /// The gain, with unit mean power; `depth` is the scattered share of that power.
-    fn gain(&self, depth: f64) -> Complex {
-        let scattered = self.phases.iter().fold((0.0, 0.0), |(re, im), p| {
-            let (s, c) = (std::f64::consts::TAU * p).sin_cos();
-            (re + c, im + s)
-        });
+    fn gain(&self, depth: f64) -> Complex64 {
+        let scattered = self.phases.iter().fold(Complex64::ZERO, |sum, p| sum + Complex64::cis(TAU * p));
         let (k, m) = ((depth / SINUSOIDS as f64).sqrt(), (1.0 - depth).sqrt());
-        (m * self.steady.0 + k * scattered.0, m * self.steady.1 + k * scattered.1)
+        self.steady * m + scattered * k
     }
 }
 
@@ -167,9 +160,9 @@ pub struct HfChannel {
     paths: [Path; 2],
     /// Path gains at the end of the previous frame, interpolated from in the next; `None` before
     /// the first frame.
-    gains: Option<[Complex; 2]>,
+    gains: Option<[Complex64; 2]>,
     /// The analytic signal, for the delayed path.
-    history: Box<[Complex; HISTORY]>,
+    history: Box<[Complex64; HISTORY]>,
     write: usize,
     /// The second path's delay in samples during the previous frame.
     delay: usize,
@@ -203,7 +196,7 @@ impl HfChannel {
             slow,
             paths,
             gains: None,
-            history: Box::new([(0.0, 0.0); HISTORY]),
+            history: Box::new([Complex64::ZERO; HISTORY]),
             write: 0,
             delay: 0,
         }
@@ -231,13 +224,9 @@ impl HfChannel {
         let slow = self.slow_gain(&c);
         let target = if delay > 0 {
             let w = std::f64::consts::FRAC_1_SQRT_2 * slow;
-            self.paths.each_ref().map(|p| {
-                let g = p.gain(depth);
-                (g.0 * w, g.1 * w)
-            })
+            self.paths.each_ref().map(|p| p.gain(depth) * w)
         } else {
-            let g = self.paths[0].gain(depth);
-            [(g.0 * slow, g.1 * slow), (0.0, 0.0)]
+            [self.paths[0].gain(depth) * slow, Complex64::ZERO]
         };
         let start = self.gains.unwrap_or(target);
         let previous_delay = if self.gains.is_some() { self.delay } else { delay };
@@ -247,17 +236,15 @@ impl HfChannel {
             let t = (n + 1) as f64 / FRAME_SAMPLES as f64;
             let (i, q) = self.hilbert.process(x);
             // The analytic signal, so that multiplying by e^{jθ} shifts frequencies upwards.
-            let z = (i as f64, -(q as f64));
+            let z = Complex64::new(i as f64, -(q as f64));
             self.history[self.write] = z;
             let at = |d: usize| self.history[(self.write + HISTORY - d) % HISTORY];
             // A change of delay crossfades between the old and the new position.
             let delayed = if previous_delay == delay { at(delay) } else { lerp(at(previous_delay), at(delay), t) };
             self.write = (self.write + 1) % HISTORY;
 
-            let h = mul(lerp(start[0], target[0], t), z);
-            let h2 = mul(lerp(start[1], target[1], t), delayed);
-            let (sin, cos) = (std::f64::consts::TAU * self.phase).sin_cos();
-            *o = ((h.0 + h2.0) * cos - (h.1 + h2.1) * sin) as f32;
+            let received = lerp(start[0], target[0], t) * z + lerp(start[1], target[1], t) * delayed;
+            *o = (received * Complex64::cis(TAU * self.phase)).re as f32;
             self.phase = (self.phase + step).rem_euclid(1.0);
         }
         self.gains = Some(target);
@@ -271,10 +258,10 @@ impl HfChannel {
             (self.drift_target, self.drift_hold) =
                 with_rng(|rng| (rng.random_range(-1.0..1.0), rng.random_range(DRIFT_HOLD_FRAMES)));
         }
-        let k = 1.0 - (-FRAME_SECONDS / DRIFT_TIME_CONSTANT).exp();
+        let k = 1.0 - pole(FRAME_SECONDS, DRIFT_TIME_CONSTANT);
         self.drift += (self.drift_target - self.drift) * k;
 
-        let a = (-FRAME_SECONDS / SLOW_FADING_TIME_CONSTANT).exp();
+        let a = pole(FRAME_SECONDS, SLOW_FADING_TIME_CONSTANT);
         let innovation = with_rng(|rng| rng.sample::<f64, _>(StandardNormal));
         self.slow = a * self.slow + (1.0 - a * a).sqrt() * innovation;
     }
@@ -284,7 +271,7 @@ impl HfChannel {
     fn slow_gain(&self, c: &HfConditions) -> f64 {
         let db = c.slow_fading_db.max(0.0) as f64 * self.slow;
         let db = if db > 0.0 { SLOW_FADING_MAX_DB * (db / SLOW_FADING_MAX_DB).tanh() } else { db };
-        10f64.powf(db / 20.0)
+        db_to_gain(db)
     }
 
     /// The slow fading level in the last frame, in dB.
@@ -296,7 +283,7 @@ impl HfChannel {
     /// Total power of the path gains in the last frame.
     #[cfg(test)]
     fn power(&self) -> f64 {
-        self.gains.map_or(0.0, |g| g.iter().map(|(re, im)| re * re + im * im).sum())
+        self.gains.map_or(0.0, |g| g.iter().map(Complex64::norm_sqr).sum())
     }
 }
 

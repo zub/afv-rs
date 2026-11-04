@@ -1,5 +1,6 @@
 //! A look-ahead peak limiter that keeps a signal within a ceiling without clipping it.
 
+use super::pole;
 use crate::SAMPLE_RATE;
 
 /// Look-ahead and attack, in samples (1 ms); the output is delayed by one less.
@@ -16,6 +17,8 @@ const RELEASE_S: f64 = 0.05;
 #[derive(Debug, Clone)]
 pub(crate) struct PeakLimiter {
     ceiling: f32,
+    /// The share of the way back to unity the gain moves per sample.
+    release: f32,
     delay: [f32; WINDOW],
     needed: [f32; WINDOW],
     held: [f32; WINDOW],
@@ -28,6 +31,7 @@ impl PeakLimiter {
     pub(crate) fn new(ceiling: f32) -> Self {
         Self {
             ceiling,
+            release: (1.0 - pole(1.0, RELEASE_S * SAMPLE_RATE as f64)) as f32,
             delay: [0.0; WINDOW],
             needed: [1.0; WINDOW],
             held: [1.0; WINDOW],
@@ -42,10 +46,9 @@ impl PeakLimiter {
     }
 
     pub(crate) fn process(&mut self, samples: &mut [f32]) {
-        let release = (1.0 - (-1.0 / (RELEASE_S * SAMPLE_RATE as f64)).exp()) as f32;
         for s in samples {
             let needed = if s.abs() > self.ceiling { self.ceiling / s.abs() } else { 1.0 };
-            self.gain = needed.min(self.gain + (1.0 - self.gain) * release);
+            self.gain = needed.min(self.gain + (1.0 - self.gain) * self.release);
             self.needed[self.cursor] = self.gain;
             let held = self.needed.iter().fold(1f32, |m, &g| m.min(g));
             self.held_sum += held as f64 - self.held[self.cursor] as f64;

@@ -155,7 +155,7 @@ impl Audio {
     }
 
     /// Microphone level over the last 300 ms, as `(rms, peak)` in 0‥1.
-    pub fn mic_level(&self) -> (f64, f64) {
+    pub fn mic_level(&self) -> (f32, f32) {
         let engine = self.lock();
         let meter = engine.transmitter.meter();
         (meter.level(), meter.peak())
@@ -167,7 +167,7 @@ impl Audio {
     }
 
     /// Automatic gain control on each received station (default: on, −18 dBFS).
-    pub fn set_agc(&self, enabled: bool, target_db: f64) {
+    pub fn set_agc(&self, enabled: bool, target_db: f32) {
         for bus in self.lock().buses() {
             bus.set_agc(enabled, target_db);
         }
@@ -190,9 +190,10 @@ impl Audio {
         self.lock().bus(bus).play_sound(samples, gain);
     }
 
+    /// A sender for this engine's events, for reporting without locking the engine.
     #[cfg(feature = "cpal")]
-    pub(crate) fn emit(&self, event: Event) {
-        let _ = self.lock().events.send(event);
+    pub(crate) fn event_sender(&self) -> broadcast::Sender<Event> {
+        self.lock().events.clone()
     }
 
     /// Applies the radio configurations to the buses.

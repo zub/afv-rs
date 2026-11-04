@@ -30,12 +30,12 @@ pub use codec::OpusError;
 pub use convert::{CaptureConverter, ConvertError, RenderConverter};
 pub use dsp::{Carrier, HfConditions, HfHardware, VhfHardware};
 pub use effects::{EffectSamples, SamplePlayer, Samples};
-pub use radio::{Output, Pan, Radio, RadioSettings, RxChange, Signal};
+pub use radio::{Output, Pan, Radio, RadioAudio, RadioSettings, RxChange, Signal};
 pub use tx::{Encoded, LevelMeter, MicProcessor, Transmitter};
 
 pub const SAMPLE_RATE: u32 = afv_proto::consts::SAMPLE_RATE_HZ;
 pub const FRAME_SAMPLES: usize = afv_proto::consts::FRAME_SAMPLES;
-pub(crate) const FRAME_DURATION_MS: f64 = afv_proto::consts::FRAME_DURATION.as_secs_f64() * 1000.0;
+pub(crate) const FRAME_DURATION_MS: f32 = afv_proto::consts::FRAME_DURATION.as_secs_f32() * 1000.0;
 
 /// One 20 ms mono frame at 48 kHz.
 pub type Frame = [f32; FRAME_SAMPLES];

@@ -1,13 +1,18 @@
 //! Port of the sndfilter dynamics compressor (MIT licence, (c) 2016 Sean Connelly,
 //! <https://github.com/velipso/sndfilter>), itself derived from Chromium's WebAudio
-//! `DynamicsCompressorKernel`. Includes afv-native's change to process a trailing partial chunk.
-//! Unlike both, the detector starts settled rather than fully compressed (see [`Compressor::new`]).
+//! `DynamicsCompressorKernel`, with the settings of `sf_defaultcomp`, which afv-native uses for
+//! every radio. Includes afv-native's change to process a trailing partial chunk. Unlike both,
+//! the detector starts settled rather than fully compressed (see [`Compressor::new`]).
 //!
 //! afv-native only ever feeds the left channel (right is silent), so this port is mono;
 //! with a silent right channel the stereo algorithm reduces to exactly this. The metering
-//! state, which does not affect the output, is omitted. Arithmetic is `f32` throughout, as in C.
+//! state, which does not affect the output, is omitted, and so are the settings that
+//! `sf_defaultcomp` leaves at no effect: 0 dB pre- and post-gain, fully wet. Arithmetic is `f32`
+//! throughout, as in C.
 
 use std::f32::consts::PI;
+
+use crate::SAMPLE_RATE;
 
 const MAX_DELAY: usize = 1024;
 /// Samples per envelope update.
@@ -35,19 +40,16 @@ fn fix(v: f32, default: f32) -> f32 {
     if v.is_finite() { v } else { default }
 }
 
-// `sf_defaultcomp`, the settings afv-native uses for every radio.
-const DEFAULT_PREGAIN_DB: f32 = 0.0;
-const DEFAULT_THRESHOLD_DB: f32 = -30.0;
-const DEFAULT_KNEE_DB: f32 = 30.0;
-const DEFAULT_RATIO: f32 = 12.0;
-const DEFAULT_ATTACK_S: f32 = 0.003;
-const DEFAULT_RELEASE_S: f32 = 0.250;
-const DEFAULT_PREDELAY_S: f32 = 0.006;
+// `sf_defaultcomp`.
+const THRESHOLD_DB: f32 = -30.0;
+const KNEE_DB: f32 = 30.0;
+const RATIO: f32 = 12.0;
+const ATTACK_S: f32 = 0.003;
+const RELEASE_S: f32 = 0.250;
+const PREDELAY_S: f32 = 0.006;
 /// Release time, as fractions of the release time, while 12, 9, 6 and 3 dB of gain remain to be
 /// recovered: fast out of deep compression, slowing towards the end.
-const DEFAULT_RELEASE_ZONES: [f32; 4] = [0.090, 0.160, 0.420, 0.980];
-const DEFAULT_POSTGAIN_DB: f32 = 0.0;
-const DEFAULT_WET: f32 = 1.0;
+const RELEASE_ZONES: [f32; 4] = [0.090, 0.160, 0.420, 0.980];
 
 // Tuning inside sndfilter (and Chromium's `DynamicsCompressorKernel`, which it follows).
 /// The knee's curvature `k` is found by bisection from this start, within this range, in this
@@ -72,23 +74,16 @@ const SILENCE: f32 = 0.0001;
 
 #[derive(Debug, Clone)]
 pub struct Compressor {
-    threshold: f32,
-    knee: f32,
-    linear_pregain: f32,
     linear_threshold: f32,
     slope: f32,
     attack_samples_inv: f32,
     sat_release_samples_inv: f32,
-    wet: f32,
-    dry: f32,
     k: f32,
     knee_db_offset: f32,
     linear_threshold_knee: f32,
     master_gain: f32,
-    a: f32,
-    b: f32,
-    c: f32,
-    d: f32,
+    /// The cubic through the release zones: `a·x³ + b·x² + c·x + d` samples.
+    release: [f32; 4],
     detector_avg: f32,
     comp_gain: f32,
     max_comp_diff_db: f32,
@@ -98,80 +93,50 @@ pub struct Compressor {
     delay: Box<[f32; MAX_DELAY]>,
 }
 
-impl Compressor {
-    /// `sf_defaultcomp`: the settings afv-native uses for every radio.
-    pub fn default_for_rate(rate: u32) -> Self {
-        Self::new(
-            rate,
-            DEFAULT_PREGAIN_DB,
-            DEFAULT_THRESHOLD_DB,
-            DEFAULT_KNEE_DB,
-            DEFAULT_RATIO,
-            DEFAULT_ATTACK_S,
-            DEFAULT_RELEASE_S,
-            DEFAULT_PREDELAY_S,
-            DEFAULT_RELEASE_ZONES,
-            DEFAULT_POSTGAIN_DB,
-            DEFAULT_WET,
-        )
+impl Default for Compressor {
+    fn default() -> Self {
+        Self::new()
     }
+}
 
-    /// `sf_advancecomp`.
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        rate: u32,
-        pregain: f32,
-        threshold: f32,
-        knee: f32,
-        ratio: f32,
-        attack: f32,
-        release: f32,
-        predelay: f32,
-        release_zones: [f32; 4],
-        postgain: f32,
-        wet: f32,
-    ) -> Self {
-        let delay_size = ((rate as f32 * predelay) as i32).clamp(1, MAX_DELAY as i32) as usize;
-        let linear_threshold = db_to_lin(threshold);
-        let slope = 1.0 / ratio;
-        let release_samples = rate as f32 * release;
+impl Compressor {
+    /// `sf_defaultcomp` at 48 kHz.
+    pub fn new() -> Self {
+        let rate = SAMPLE_RATE as f32;
+        let delay_size = ((rate * PREDELAY_S) as i32).clamp(1, MAX_DELAY as i32) as usize;
+        let linear_threshold = db_to_lin(THRESHOLD_DB);
+        let slope = 1.0 / RATIO;
+        let release_samples = rate * RELEASE_S;
 
+        let x_knee = db_to_lin(THRESHOLD_DB + KNEE_DB);
         let mut k = KNEE_K_START;
-        let mut knee_db_offset = 0.0;
-        let mut linear_threshold_knee = 0.0;
-        if knee > 0.0 {
-            let x_knee = db_to_lin(threshold + knee);
-            let (mut min_k, mut max_k) = KNEE_K_RANGE;
-            for _ in 0..KNEE_K_STEPS {
-                if knee_slope(x_knee, k, linear_threshold) < slope {
-                    max_k = k;
-                } else {
-                    min_k = k;
-                }
-                k = (min_k * max_k).sqrt();
+        let (mut min_k, mut max_k) = KNEE_K_RANGE;
+        for _ in 0..KNEE_K_STEPS {
+            if knee_slope(x_knee, k, linear_threshold) < slope {
+                max_k = k;
+            } else {
+                min_k = k;
             }
-            knee_db_offset = lin_to_db(knee_curve(x_knee, k, linear_threshold));
-            linear_threshold_knee = db_to_lin(threshold + knee);
+            k = (min_k * max_k).sqrt();
         }
 
+        // The cubic through the four release zones at x = 0, 1, 2, 3.
+        let [y1, y2, y3, y4] = RELEASE_ZONES.map(|z| release_samples * z);
         let mut c = Self {
-            threshold,
-            knee,
-            linear_pregain: db_to_lin(pregain),
             linear_threshold,
             slope,
-            attack_samples_inv: 1.0 / (rate as f32 * attack),
-            sat_release_samples_inv: 1.0 / (rate as f32 * SATURATION_RELEASE_S),
-            wet,
-            dry: 1.0 - wet,
+            attack_samples_inv: 1.0 / (rate * ATTACK_S),
+            sat_release_samples_inv: 1.0 / (rate * SATURATION_RELEASE_S),
             k,
-            knee_db_offset,
-            linear_threshold_knee,
+            knee_db_offset: lin_to_db(knee_curve(x_knee, k, linear_threshold)),
+            linear_threshold_knee: db_to_lin(THRESHOLD_DB + KNEE_DB),
             master_gain: 0.0,
-            a: 0.0,
-            b: 0.0,
-            c: 0.0,
-            d: 0.0,
+            release: [
+                (-y1 + 3.0 * y2 - 3.0 * y3 + y4) / 6.0,
+                y1 - 2.5 * y2 + 2.0 * y3 - 0.5 * y4,
+                (-11.0 * y1 + 18.0 * y2 - 9.0 * y3 + 2.0 * y4) / 6.0,
+                y1,
+            ],
             // sndfilter starts at 0.0, i.e. fully compressed, which made every new compressor
             // about 14 dB quieter for its first 0.3 s. Start settled instead.
             detector_avg: 1.0,
@@ -182,15 +147,7 @@ impl Compressor {
             delay_read: if delay_size > 1 { 1 } else { 0 },
             delay: Box::new([0.0; MAX_DELAY]),
         };
-        let full_level = c.comp_curve(1.0);
-        c.master_gain = db_to_lin(postgain) * (1.0 / full_level).powf(MAKEUP_EXPONENT);
-
-        // The cubic through the four release zones at x = 0, 1, 2, 3.
-        let [y1, y2, y3, y4] = release_zones.map(|z| release_samples * z);
-        c.a = (-y1 + 3.0 * y2 - 3.0 * y3 + y4) / 6.0;
-        c.b = y1 - 2.5 * y2 + 2.0 * y3 - 0.5 * y4;
-        c.c = (-11.0 * y1 + 18.0 * y2 - 9.0 * y3 + 2.0 * y4) / 6.0;
-        c.d = y1;
+        c.master_gain = (1.0 / c.comp_curve(1.0)).powf(MAKEUP_EXPONENT);
         c
     }
 
@@ -198,18 +155,16 @@ impl Compressor {
         if x < self.linear_threshold {
             return x;
         }
-        if self.knee <= 0.0 {
-            return db_to_lin(self.threshold + self.slope * (lin_to_db(x) - self.threshold));
-        }
         if x < self.linear_threshold_knee {
             return knee_curve(x, self.k, self.linear_threshold);
         }
-        db_to_lin(self.knee_db_offset + self.slope * (lin_to_db(x) - self.threshold - self.knee))
+        db_to_lin(self.knee_db_offset + self.slope * (lin_to_db(x) - THRESHOLD_DB - KNEE_DB))
     }
 
     fn adaptive_release(&self, x: f32) -> f32 {
+        let [a, b, c, d] = self.release;
         let x2 = x * x;
-        self.a * x2 * x + self.b * x2 + self.c * x + self.d
+        a * x2 * x + b * x2 + c * x + d
     }
 
     /// Back to the state it starts in: settled, with an empty pre-delay.
@@ -246,7 +201,7 @@ impl Compressor {
             };
 
             for sample in chunk {
-                let input = *sample * self.linear_pregain;
+                let input = *sample;
                 self.delay[self.delay_write] = input;
 
                 let input_max = input.abs();
@@ -267,7 +222,7 @@ impl Compressor {
                     self.comp_gain = (self.comp_gain * envelope_rate).min(1.0);
                 }
 
-                let gain = self.dry + self.wet * self.master_gain * (ang90 * self.comp_gain).sin();
+                let gain = self.master_gain * (ang90 * self.comp_gain).sin();
                 *sample = self.delay[self.delay_read] * gain;
 
                 self.delay_read = (self.delay_read + 1) % self.delay_size;
@@ -282,13 +237,12 @@ mod tests {
     use super::*;
     use crate::test_util::{db, peak, sine};
 
-    const RATE: u32 = 48_000;
     /// The pre-delay is 6 ms; the read cursor starts one ahead of the write cursor in a ring of
     /// that size, so samples come out one sample earlier.
-    const DELAY: usize = (RATE as f32 * 0.006) as usize - 1;
+    const DELAY: usize = (SAMPLE_RATE as f32 * PREDELAY_S) as usize - 1;
 
     fn compressor() -> Compressor {
-        Compressor::default_for_rate(RATE)
+        Compressor::new()
     }
 
     /// Steady-state output level in dB for a 450 Hz sine at `input_db` dBFS peak.

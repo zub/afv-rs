@@ -36,6 +36,8 @@ version = "0.1.0"
 dependencies = [
  "afv-proto",
  "hound",
+ "num-complex",
+ "num-traits",
  "opus",
  "rand",
  "rand_distr",

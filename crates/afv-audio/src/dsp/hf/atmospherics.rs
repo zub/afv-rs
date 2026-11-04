@@ -19,7 +19,7 @@ use rand::rngs::SmallRng;
 use rand_distr::{Exp1, Pareto, StandardNormal};
 
 use super::HfConditions;
-use crate::dsp::{voice_rms, with_rng};
+use crate::dsp::{db_to_gain, pole, voice_rms, with_rng};
 use crate::{Frame, SAMPLE_RATE};
 
 /// Random events at a rate that may change at any time (a Poisson process): each is due when the
@@ -105,7 +105,7 @@ impl Crackle {
         // Larger crashes last a little longer.
         let tau_samples = (CRACKLE_SHORTEST_S + CRACKLE_LENGTH_RANGE_S * size as f64) * SAMPLE_RATE as f64;
         let amplitude = level * CRACKLE_MAX_RELATIVE * voice_rms() * size;
-        let burst = Burst { amplitude, decay: (-1.0 / tau_samples).exp() as f32 };
+        let burst = Burst { amplitude, decay: pole(1.0, tau_samples) as f32 };
         let slot = self.bursts.iter_mut().min_by(|a, b| a.amplitude.total_cmp(&b.amplitude)).expect("MAX_BURSTS > 0");
         *slot = burst;
         if size > CRACKLE_RUN_THRESHOLD {
@@ -227,8 +227,7 @@ impl Sounders {
         let rate = SOUNDER_SWEEP_RATES[rng.random_range(0..SOUNDER_SWEEP_RATES.len())];
         let up = rng.random_bool(SOUNDER_UPWARD);
         let sweep = if up { rate } else { -rate } / SAMPLE_RATE as f64;
-        let amplitude =
-            level * sounder_max_amplitude() * 10f32.powf(-SOUNDER_STRENGTH_SPREAD_DB / 20.0 * rng.random::<f32>());
+        let amplitude = level * sounder_max_amplitude() * db_to_gain(-SOUNDER_STRENGTH_SPREAD_DB * rng.random::<f32>());
         let chirp = Chirp {
             wait: 0,
             frequency: if up { 0.0 } else { SOUNDER_SPAN_HZ },
