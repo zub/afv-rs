@@ -1,12 +1,6 @@
 use std::fmt;
 use std::str::FromStr;
 
-const HZ_PER_MHZ: u32 = 1_000_000;
-/// Decimal places of MHz that resolve 1 Hz…
-const MHZ_DECIMALS: usize = 6;
-/// …and the fewest shown, as frequencies are usually written.
-const MHZ_DECIMALS_SHOWN: usize = 3;
-
 /// A radio frequency in Hz, written in MHz: `"122.800"`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub struct Frequency(u32);
@@ -16,19 +10,32 @@ impl Frequency {
         Self(hz)
     }
 
-    /// Rounds to the nearest Hz. Prefer [`str::parse`] for exact values from text.
-    ///
-    /// # Panics
-    ///
-    /// If `mhz` is negative, not finite or above 4294.967295 MHz.
-    pub fn mhz(mhz: f64) -> Self {
-        let hz = (mhz * HZ_PER_MHZ as f64).round();
-        assert!(hz.is_finite() && (0.0..=u32::MAX as f64).contains(&hz), "frequency {mhz} MHz out of range");
-        Self(hz as u32)
+    pub const fn from_khz(khz: u32) -> Self {
+        Self(khz * 1000)
     }
 
     pub const fn hz(self) -> u32 {
         self.0
+    }
+
+    pub const fn is_nav_vhf(self) -> bool {
+        108_000_000 <= self.0 && self.0 <= 117_950_000
+    }
+
+    pub const fn is_voice_vhf(self) -> bool {
+        118_000_000 <= self.0 && self.0 < 137_000_000
+    }
+
+    pub const fn is_vhf(self) -> bool {
+        108_000_000 <= self.0 && self.0 < 137_000_000
+    }
+
+    pub const fn is_833_channel(self) -> bool {
+        self.is_voice_vhf()
+            && match (self.0 / 1000) % 25 {
+                5 | 10 | 15 => true,
+                _ => false,
+            }
     }
 
     /// HF radios (below 30 MHz) are single sideband and sound different. 0 is not HF.
@@ -38,12 +45,10 @@ impl Frequency {
 }
 
 impl fmt::Display for Frequency {
-    /// MHz with at least three decimals: `122.800`, `8.891`, `118.0125`.
+    /// MHz with exactly three decimals: `122.800`, `8.891`, `118.005`.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let (mhz, hz) = (self.0 / HZ_PER_MHZ, self.0 % HZ_PER_MHZ);
-        let fraction = format!("{hz:0MHZ_DECIMALS$}");
-        let fraction = fraction.trim_end_matches('0');
-        write!(f, "{mhz}.{fraction:0<MHZ_DECIMALS_SHOWN$}")
+        let (mhz, khz) = (self.0 / 1_000_000, (self.0 % 1_000_000) / 1000);
+        write!(f, "{mhz}.{khz:03}")
     }
 }
 
@@ -54,22 +59,20 @@ pub struct ParseFrequencyError(String);
 impl FromStr for Frequency {
     type Err = ParseFrequencyError;
 
-    /// Parses MHz exactly, without going through floating point.
+    /// Parses MHz with one to three decimals, exactly: `"121.5"` is 121.500 MHz.
+    /// VHF must be on the channel grid: 50 kHz for nav, 25 kHz or 8.33 kHz for voice.
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let err = || ParseFrequencyError(s.to_owned());
-        let digits = |p: &str| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit());
-        let (mhz, fraction) = match s.trim().split_once('.') {
-            Some((mhz, fraction)) if digits(fraction) => (mhz, fraction),
-            Some(_) => return Err(err()),
-            None => (s.trim(), ""),
-        };
-        if !digits(mhz) || fraction.len() > MHZ_DECIMALS {
+        let (mhz, fraction) = s.trim().split_once('.').ok_or_else(err)?;
+        if fraction.len() > 3 {
             return Err(err());
         }
-        let mhz: u64 = mhz.parse().map_err(|_| err())?;
-        let fraction: u64 = format!("{fraction:0<MHZ_DECIMALS$}").parse().map_err(|_| err())?;
-        let hz = mhz.checked_mul(HZ_PER_MHZ as u64).and_then(|h| h.checked_add(fraction)).ok_or_else(err)?;
-        u32::try_from(hz).map(Self).map_err(|_| err())
+        let mhz: u32 = mhz.parse().map_err(|_| err())?;
+        let khz = fraction.parse::<u32>().map_err(|_| err())? * 10u32.pow(3 - fraction.len() as u32);
+        let f = mhz.checked_mul(1_000_000).and_then(|hz| hz.checked_add(khz * 1000)).map(Self).ok_or_else(err)?;
+        let spacing = if f.is_nav_vhf() { 50 } else { 25 };
+        let off_grid = f.is_vhf() && !khz.is_multiple_of(spacing) && !f.is_833_channel();
+        if f.0 == 0 || off_grid { Err(err()) } else { Ok(f) }
     }
 }
 
@@ -79,13 +82,27 @@ mod tests {
 
     #[test]
     fn parses_exactly() {
-        assert_eq!("122.800".parse(), Ok(Frequency::from_hz(122_800_000)));
-        assert_eq!("122.8".parse(), Ok(Frequency::from_hz(122_800_000)));
-        assert_eq!(" 118.0125 ".parse(), Ok(Frequency::from_hz(118_012_500)));
-        assert_eq!("8.891".parse(), Ok(Frequency::from_hz(8_891_000)));
-        assert_eq!("121".parse(), Ok(Frequency::from_hz(121_000_000)));
-        assert_eq!("4294.967295".parse(), Ok(Frequency::from_hz(u32::MAX)));
-        for bad in ["", ".", "122.", ".5", "122.8000001", "abc", "-1.0", "1 22.8", "4294.967296", "122,800"] {
+        for (text, khz) in [
+            ("122.800", 122_800),
+            ("122.8", 122_800),
+            ("121.5", 121_500),
+            ("119.105", 119_105),
+            ("123.45", 123_450),
+            (" 118.005 ", 118_005),
+            ("8.891", 8_891),
+            ("136.990", 136_990),
+            ("112.150", 112_150),
+            ("117.975", 117_975),
+            ("137.001", 137_001),
+            ("4294.967", 4_294_967),
+        ] {
+            assert_eq!(text.parse(), Ok(Frequency::from_khz(khz)), "{text:?}");
+        }
+        for bad in [
+            "", ".", "121", "122.", ".5", "118.0125", "122.8000", "abc", "-1.0", "1 22.8", "1.2.3", "4294.968",
+            "5000.0", "122,800", "118.001", "118.020", "121.545", "136.995", "108.004", "108.005", "112.110",
+            "108.025", "117.925", "117.990", "0.0", "0.000",
+        ] {
             assert!(bad.parse::<Frequency>().is_err(), "{bad:?}");
         }
     }
@@ -93,20 +110,20 @@ mod tests {
     #[test]
     fn displays_in_mhz() {
         assert_eq!(Frequency::from_hz(122_800_000).to_string(), "122.800");
-        assert_eq!(Frequency::from_hz(118_012_500).to_string(), "118.0125");
+        assert_eq!(Frequency::from_hz(118_005_000).to_string(), "118.005");
+        assert_eq!(Frequency::from_hz(121_050_000).to_string(), "121.050");
         assert_eq!(Frequency::from_hz(8_891_000).to_string(), "8.891");
         assert_eq!(Frequency::from_hz(0).to_string(), "0.000");
-        for hz in [122_800_000, 118_012_500, 8_891_000, 1, u32::MAX] {
-            let f = Frequency::from_hz(hz);
+        for khz in [122_800, 119_105, 118_005, 8_891, 4_294_967] {
+            let f = Frequency::from_khz(khz);
             assert_eq!(f.to_string().parse(), Ok(f));
         }
     }
 
     #[test]
-    fn mhz_rounds_to_hz() {
-        assert_eq!(Frequency::mhz(122.8), Frequency::from_hz(122_800_000));
-        assert_eq!(Frequency::mhz(118.0125), Frequency::from_hz(118_012_500));
-        assert!(Frequency::mhz(29.999).is_hf() && !Frequency::mhz(30.0).is_hf());
-        assert!(!Frequency::from_hz(0).is_hf(), "untuned is not HF");
+    fn vhf_833_channels() {
+        assert!(Frequency::from_hz(119_105_000).is_833_channel());
+        assert!(!Frequency::from_hz(121_500_000).is_833_channel());
+        assert!(!Frequency::from_hz(138_105_000).is_833_channel());
     }
 }
