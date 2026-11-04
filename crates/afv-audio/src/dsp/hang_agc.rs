@@ -8,7 +8,7 @@ use super::{db_to_gain, pole, voice_rms};
 use crate::SAMPLE_RATE;
 
 /// The gain is set this far ahead of the audio (2 ms), so that it can start down before a crash.
-const LOOKAHEAD: usize = 96;
+const LOOKAHEAD: usize = (SAMPLE_RATE * 2 / 1000) as usize;
 /// Peaks of an unfaded voice, relative to its RMS level.
 const VOICE_CREST: f32 = 4.0;
 
@@ -34,7 +34,7 @@ pub(crate) struct HangTiming {
 /// down for a moment, as on a real set.
 #[derive(Debug, Clone)]
 pub(crate) struct HangAgc {
-    target_peak: f32,
+    timing: HangTiming,
     /// Per sample: the share of the way to a lower gain the attack moves…
     attack: f32,
     /// …the samples it then holds…
@@ -44,7 +44,7 @@ pub(crate) struct HangAgc {
     max_gain: f32,
     gain: f32,
     hang: u32,
-    delay: Box<[f32; LOOKAHEAD]>,
+    delay: [f32; LOOKAHEAD],
     cursor: usize,
 }
 
@@ -54,36 +54,38 @@ impl HangAgc {
         let rate = SAMPLE_RATE as f32;
         let max_gain = target_peak / (VOICE_CREST * voice_rms()) * db_to_gain(range_db);
         Self {
-            target_peak,
+            timing,
             attack: 1.0 - pole(1.0, attack_s * rate),
             hang_samples: (hang_s * rate) as u32,
             decay: db_to_gain(decay_db_per_s / rate),
             max_gain,
             gain: max_gain,
             hang: 0,
-            delay: Box::new([0.0; LOOKAHEAD]),
+            delay: [0.0; LOOKAHEAD],
             cursor: 0,
         }
     }
 
     /// Back to full gain with nothing in flight, as after transmitting.
     pub(crate) fn reset(&mut self) {
-        (self.gain, self.hang, self.cursor) = (self.max_gain, 0, 0);
-        self.delay.fill(0.0);
+        *self = Self::new(self.timing);
     }
 
     pub(crate) fn process(&mut self, samples: &mut [f32]) {
+        let target_peak = self.timing.target_peak;
         for s in samples {
             let ahead = s.abs();
-            if ahead * self.gain > self.target_peak {
-                self.gain += (self.target_peak / ahead - self.gain) * self.attack;
+            if ahead * self.gain > target_peak {
+                self.gain += (target_peak / ahead - self.gain) * self.attack;
                 self.hang = self.hang_samples;
             } else if self.hang > 0 {
                 self.hang -= 1;
             } else {
                 self.gain = (self.gain * self.decay).min(self.max_gain);
             }
-            let delayed = std::mem::replace(&mut self.delay[self.cursor], *s);
+            // The ring's oldest sample goes out as the newest comes in.
+            let delayed = self.delay[self.cursor];
+            self.delay[self.cursor] = *s;
             self.cursor = (self.cursor + 1) % LOOKAHEAD;
             *s = delayed * self.gain;
         }

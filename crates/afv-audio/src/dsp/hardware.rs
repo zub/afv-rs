@@ -264,7 +264,7 @@ impl Spec {
 #[derive(Debug, Clone)]
 enum GainControl {
     Compressor(Compressor),
-    Hang(HangAgc),
+    Hang(Box<HangAgc>),
 }
 
 /// One radio set's receiver, applied to everything it hears: band filter, gain control, audio
@@ -291,7 +291,7 @@ impl RadioSet {
         let (response, response_gain) = spec.response();
         let gain_control = match spec.gain_control {
             GainControlSpec::Compressor => GainControl::Compressor(Compressor::new()),
-            GainControlSpec::Hang(timing) => GainControl::Hang(HangAgc::new(timing)),
+            GainControlSpec::Hang(timing) => GainControl::Hang(Box::new(HangAgc::new(timing))),
         };
         Self {
             selectivity: spec.selectivity(),
