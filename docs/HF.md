@@ -5,8 +5,9 @@ that and how afv-rs imitates it. None of this is in afv-native, which plays HF l
 a noise recording; the AFV servers only tell the client *who* is transmitting on *which*
 frequency, so everything below happens in the receiving client.
 
-The code is in `crates/afv-audio/src/dsp/hf.rs`; the strength of every effect is set by
-`HfConditions` (`client.audio().set_hf_conditions(...)`).
+The code is in `crates/afv-audio/src/dsp/hf/` (propagation in `channel.rs`, noise, static and
+sounders in `atmospherics.rs`) and the HF set in `dsp/hardware.rs`; the strength of every effect
+is set by `HfConditions` (`client.audio().set_hf_conditions(...)`).
 
 ## 1. Mistuning: the "Donald Duck" voice
 
