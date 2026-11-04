@@ -1,10 +1,15 @@
 //! Transmit side: microphone frames to Opus packets. Port of the transmit half of afv-native's
 //! radio simulations.
 
+use std::panic::{AssertUnwindSafe, catch_unwind};
+
 use crate::codec::{Encoder, OpusError};
 use crate::{FRAME_SAMPLES, Frame};
 
 /// Optional microphone processing (noise suppression, AGC, ...) run before gain and encoding.
+///
+/// A processor that panics is removed, and the microphone goes out unprocessed from that frame
+/// on (see [`Transmitter::take_processor_failure`]). This needs `panic = "unwind"`, the default.
 pub trait MicProcessor: Send {
     fn process(&mut self, frame: &mut Frame);
 }
@@ -28,6 +33,7 @@ pub struct Transmitter {
     sequence: u32,
     frame: Box<Frame>,
     meter: LevelMeter,
+    processor_failed: bool,
 }
 
 impl Transmitter {
@@ -41,6 +47,7 @@ impl Transmitter {
             sequence: 0,
             frame: Box::new([0.0; FRAME_SAMPLES]),
             meter: LevelMeter::new(),
+            processor_failed: false,
         })
     }
 
@@ -61,6 +68,11 @@ impl Transmitter {
         self.ptt
     }
 
+    /// Whether the processor panicked and was removed since this was last asked.
+    pub fn take_processor_failure(&mut self) -> bool {
+        std::mem::take(&mut self.processor_failed)
+    }
+
     pub fn meter(&self) -> &LevelMeter {
         &self.meter
     }
@@ -76,7 +88,16 @@ impl Transmitter {
     pub fn process(&mut self, mic: &Frame) -> Result<Option<Encoded<'_>>, OpusError> {
         self.frame.copy_from_slice(mic);
         if let Some(p) = &mut self.processor {
-            p.process(&mut self.frame);
+            // Caller code: a panic must not take the transmitter, or the audio thread running
+            // it, down. The processor's state is unknown afterwards, so it goes, and this frame
+            // is sent as captured.
+            let frame = &mut *self.frame;
+            if catch_unwind(AssertUnwindSafe(|| p.process(frame))).is_err() {
+                let processor = self.processor.take();
+                let _ = catch_unwind(AssertUnwindSafe(|| drop(processor)));
+                self.processor_failed = true;
+                self.frame.copy_from_slice(mic);
+            }
         }
         for s in self.frame.iter_mut() {
             *s = (*s * self.gain).clamp(-1.0, 1.0);
@@ -132,5 +153,35 @@ impl LevelMeter {
     /// Highest level in the window.
     pub fn peak(&self) -> f32 {
         self.window.iter().copied().fold(0.0, f32::max)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Halves the signal, and panics on its third frame.
+    struct Flaky(u32);
+
+    impl MicProcessor for Flaky {
+        fn process(&mut self, frame: &mut Frame) {
+            self.0 += 1;
+            frame.iter_mut().for_each(|s| *s *= 0.5);
+            assert!(self.0 != 3, "processor bug");
+        }
+    }
+
+    #[test]
+    fn a_panicking_processor_is_removed_and_the_microphone_goes_out_unprocessed() {
+        let mut tx = Transmitter::new().unwrap();
+        tx.set_processor(Some(Box::new(Flaky(0))));
+        tx.set_ptt(true);
+        let mic = [0.4; FRAME_SAMPLES];
+        for frame in 1..=5 {
+            assert!(tx.process(&mic).unwrap().is_some(), "frame {frame} is sent");
+            let expected = if frame < 3 { 0.2 } else { 0.4 };
+            assert!(tx.last_frame().iter().all(|&s| s == expected), "frame {frame}");
+            assert_eq!(tx.take_processor_failure(), frame == 3, "frame {frame}");
+        }
     }
 }

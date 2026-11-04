@@ -294,6 +294,32 @@ async fn adding_a_receiver_mid_transmission_does_not_interrupt_it() {
 }
 
 #[tokio::test]
+async fn a_panicking_mic_processor_is_reported_and_transmission_goes_on() {
+    struct Broken;
+    impl afv::MicProcessor for Broken {
+        fn process(&mut self, _: &mut afv_audio::Frame) {
+            panic!("noise suppressor bug");
+        }
+    }
+
+    let server = FakeServer::start().await;
+    let client = server.client_builder().connect().await.unwrap();
+    let mut events = client.events();
+    client.set_position(POS);
+    client.add_radio(tx_radio("122.800"));
+    client.set_ptt(true);
+    wait_event(&mut events, |e| matches!(e, Event::PttOpened)).await;
+    let audio = client.audio();
+    audio.set_mic_processor(Some(Box::new(Broken)));
+    for _ in 0..5 {
+        audio.capture(&[0.1; 960], 48_000, 1).unwrap();
+    }
+    wait_event(&mut events, |e| matches!(e, Event::MicProcessorFailed)).await;
+    eventually("every frame sent", || server.fake.audio.lock().unwrap().len() >= 5).await;
+    client.disconnect().await;
+}
+
+#[tokio::test]
 async fn received_audio_is_played_and_reported_per_radio() {
     let server = FakeServer::start().await;
     let client = server.client_builder().connect().await.unwrap();

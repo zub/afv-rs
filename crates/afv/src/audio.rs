@@ -139,6 +139,10 @@ impl Audio {
             Ok(_) => {}
             Err(e) => tracing::warn!("encoding failed: {e}"),
         });
+        if engine.transmitter.take_processor_failure() {
+            tracing::error!("microphone processor panicked; transmitting without it");
+            let _ = engine.events.send(Event::MicProcessorFailed);
+        }
         Ok(())
     }
 

@@ -29,6 +29,9 @@ pub enum Event {
     TransceiverSyncFailed(Arc<Error>),
     /// An audio device failed or changed (`cpal` backend).
     DeviceError(String),
+    /// The microphone processor ([`crate::Audio::set_mic_processor`]) panicked and was removed;
+    /// the microphone is transmitted without it.
+    MicProcessorFailed,
     /// The receiver fell behind and missed this many events.
     Missed(u64),
 }
