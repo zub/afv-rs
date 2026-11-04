@@ -3,6 +3,7 @@
 
 use std::io;
 use std::sync::Mutex;
+use std::sync::atomic::AtomicU64;
 
 use afv_proto::api::{CrossCoupleGroup, Transceiver};
 use afv_proto::voice::{AudioRx, AudioTx, Dto};
@@ -21,6 +22,8 @@ pub(crate) struct Shared {
     pub(super) api: Api,
     /// `None` while reconnecting.
     pub(super) link: Mutex<Option<Link>>,
+    /// The transmit sequence a new link starts from: where the last released link stopped.
+    pub(super) next_tx_sequence: AtomicU64,
     transceivers: Mutex<Vec<Transceiver>>,
     cross_couple_groups: Mutex<Option<Vec<CrossCoupleGroup>>>,
     /// Held while posting transceivers or cross-couple groups, and while releasing the callsign,
@@ -38,6 +41,7 @@ impl Shared {
         Ok(Self {
             api: Api::new(config)?,
             link: Mutex::new(None),
+            next_tx_sequence: AtomicU64::new(0),
             transceivers: Mutex::new(Vec::new()),
             cross_couple_groups: Mutex::new(None),
             posting: AsyncMutex::new(()),

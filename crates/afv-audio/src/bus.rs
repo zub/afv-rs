@@ -75,10 +75,14 @@ impl Bus {
         }
     }
 
-    pub fn remove_radio(&mut self, id: RadioId) {
+    /// Removes a radio. `on_rx` is told that every talker it was hearing is no longer heard on it.
+    pub fn remove_radio(&mut self, id: RadioId, mut on_rx: impl FnMut(RadioId, &str, RxChange)) {
         self.radios.retain(|(i, _)| *i != id);
-        for t in self.talkers.values_mut() {
-            t.heard_on.retain(|&r| r != id);
+        for (callsign, t) in &mut self.talkers {
+            if let Some(i) = t.heard_on.iter().position(|&r| r == id) {
+                t.heard_on.swap_remove(i);
+                on_rx(id, callsign, RxChange::Ended);
+            }
         }
     }
 

@@ -228,11 +228,23 @@ pub struct Channel {
 
 impl Channel {
     pub fn new(config: &ChannelConfig) -> Self {
-        Self { codec: Codec::new(config), next_sequence: 0, replay: ReplayWindow::new() }
+        Self::continuing(config, 0)
+    }
+
+    /// A channel whose transmit sequence starts at `next_sequence`, for a client reconnecting
+    /// with new keys. Continuing where the previous channel stopped means the server never sees
+    /// the sequence go backwards, whether or not it keeps state from the previous session.
+    pub fn continuing(config: &ChannelConfig, next_sequence: u64) -> Self {
+        Self { codec: Codec::new(config), next_sequence, replay: ReplayWindow::new() }
     }
 
     pub fn codec(&self) -> &Codec {
         &self.codec
+    }
+
+    /// The sequence number the next sealed datagram will carry.
+    pub fn next_sequence(&self) -> u64 {
+        self.next_sequence
     }
 
     /// Encrypts `dto` using the next transmit sequence number.

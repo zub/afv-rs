@@ -144,6 +144,10 @@ async fn heartbeat_timeout_reconnects_and_restores_transceivers() {
     // The new link works with the new keys.
     let heartbeats = server.fake.heartbeats.load(SeqCst);
     eventually("heartbeats on new link", || server.fake.heartbeats.load(SeqCst) > heartbeats + 2).await;
+
+    // ...and numbers its datagrams on from where the old one stopped.
+    let sequences = server.fake.sequences.lock().unwrap().clone();
+    assert!(sequences.windows(2).all(|w| w[1] > w[0]), "{sequences:?}");
 }
 
 #[tokio::test]

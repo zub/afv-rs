@@ -284,6 +284,40 @@ fn bus_reports_each_talker_per_radio() {
 }
 
 #[test]
+fn removing_a_radio_mid_reception_ends_its_reception() {
+    let mut bus = Bus::new(EffectSamples::default());
+    bus.set_radio(1, clean(FREQ));
+    bus.set_radio(2, clean(FREQ));
+    let mut tx = Transmitter::new().unwrap();
+    tx.set_ptt(true);
+    let start = Instant::now();
+    let mut events = Vec::new();
+    let (mut l, mut r) = ([0.0; FRAME_SAMPLES], [0.0; FRAME_SAMPLES]);
+    for i in 0..40 {
+        let now = start + Duration::from_millis(20 * i as u64);
+        if let Some(p) = tx.process(&sine(i, 440.0, 0.3)).unwrap() {
+            bus.push("SAS123", p.sequence, p.opus, p.last_packet, &rx(FREQ, 1.0), now).unwrap();
+        }
+        match i {
+            10 => bus.remove_radio(1, |id, callsign, c| events.push((i, id, callsign.to_owned(), c))),
+            // Removing it again, or a radio that never heard anything, reports nothing.
+            11 => {
+                bus.remove_radio(1, |id, callsign, c| events.push((i, id, callsign.to_owned(), c)));
+                bus.remove_radio(7, |id, callsign, c| events.push((i, id, callsign.to_owned(), c)));
+            }
+            // Back while the talker is still transmitting: heard again from the next frame.
+            20 => bus.set_radio(1, clean(FREQ)),
+            _ => {}
+        }
+        bus.render(&mut l, Some(&mut r), |id, callsign, c| events.push((i, id, callsign.to_owned(), c)));
+    }
+    let radio_1: Vec<_> = events.iter().filter(|e| e.1 == 1).map(|e| (e.0, e.3)).collect();
+    assert_eq!(radio_1, [(0, RxChange::Started), (10, RxChange::Ended), (20, RxChange::Started)], "{events:?}");
+    let radio_2: Vec<_> = events.iter().filter(|e| e.1 == 2).map(|e| (e.0, e.3)).collect();
+    assert_eq!(radio_2, [(0, RxChange::Started)], "{events:?}");
+}
+
+#[test]
 fn transmitting_mid_reception_neither_clicks_nor_loses_the_talker() {
     let ones: Arc<[f32]> = vec![1.0; 4800].into();
     let fx = EffectSamples { click: Some(ones), ..EffectSamples::default() };

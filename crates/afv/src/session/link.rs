@@ -4,6 +4,7 @@
 use std::io;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use afv_proto::api::VoiceServer;
@@ -35,9 +36,9 @@ pub(super) struct Link {
 }
 
 impl Link {
-    /// Opens a UDP socket connected to the voice server. Returns the link for sending and a tokio
-    /// handle to the same socket for receiving.
-    async fn open(server: &VoiceServer) -> Result<(Self, UdpSocket)> {
+    /// Opens a UDP socket connected to the voice server, numbering datagrams from `next_sequence`.
+    /// Returns the link for sending and a tokio handle to the same socket for receiving.
+    async fn open(server: &VoiceServer, next_sequence: u64) -> Result<(Self, UdpSocket)> {
         let address = &server.address_ipv4;
         let remote = tokio::net::lookup_host(address).await?.next().ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidInput, format!("voice server address {address:?} did not resolve"))
@@ -49,7 +50,8 @@ impl Link {
         let socket = std::net::UdpSocket::bind(local)?;
         socket.connect(remote)?;
         socket.set_nonblocking(true)?;
-        let link = Self { sender: Arc::new(socket.try_clone()?), channel: Channel::new(&server.channel_config) };
+        let channel = Channel::continuing(&server.channel_config, next_sequence);
+        let link = Self { sender: Arc::new(socket.try_clone()?), channel };
         Ok((link, UdpSocket::from_std(socket)?))
     }
 }
@@ -72,7 +74,9 @@ impl Shared {
     pub(super) async fn establish(&self) -> Result<Established> {
         let token_refresh = self.api.authenticate().await?;
         let server = self.api.allocate_voice_session().await?;
-        let (link, socket) = Link::open(&server).await?;
+        // Keep numbering datagrams where the previous link stopped: harmless if the server forgot
+        // the old session, and needed if it did not.
+        let (link, socket) = Link::open(&server, self.next_tx_sequence.load(Ordering::Relaxed)).await?;
         *self.link.lock().unwrap() = Some(link);
         self.set_state(SessionState::Connected);
         self.post_transceivers().await;
@@ -115,9 +119,10 @@ impl Shared {
     /// Closes the link and releases the callsign on the server, once no post is in progress.
     async fn release(&self) {
         let _posting = self.posting.lock().await;
-        if self.link.lock().unwrap().take().is_some()
-            && let Err(e) = self.api.release_voice_session().await
-        {
+        let Some(link) = self.link.lock().unwrap().take() else { return };
+        self.next_tx_sequence.store(link.channel.next_sequence(), Ordering::Relaxed);
+        drop(link);
+        if let Err(e) = self.api.release_voice_session().await {
             tracing::debug!("releasing callsign failed: {e}");
         }
     }

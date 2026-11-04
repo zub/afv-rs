@@ -72,6 +72,17 @@ impl BusOutput {
     }
 }
 
+/// Turns a bus's reception changes into events.
+fn report_rx(events: &broadcast::Sender<Event>) -> impl FnMut(afv_audio::RadioId, &str, RxChange) + '_ {
+    move |radio, callsign, change| {
+        let (radio, callsign) = (RadioId(radio), callsign.to_owned());
+        let _ = events.send(match change {
+            RxChange::Started => Event::RxStarted { radio, callsign },
+            RxChange::Ended => Event::RxEnded { radio, callsign },
+        });
+    }
+}
+
 /// Recreates `slot`'s converter when the format changes.
 fn converter<C>(
     slot: &mut Option<(Format, C)>,
@@ -140,13 +151,7 @@ impl Audio {
             OutputBus::Headset => headset,
             OutputBus::Speaker => speaker,
         };
-        output.render(out, Format { sample_rate, channels }, |radio, callsign, change| {
-            let (radio, callsign) = (RadioId(radio), callsign.to_owned());
-            let _ = events.send(match change {
-                RxChange::Started => Event::RxStarted { radio, callsign },
-                RxChange::Ended => Event::RxEnded { radio, callsign },
-            });
-        })
+        output.render(out, Format { sample_rate, channels }, report_rx(events))
     }
 
     /// Microphone gain, linear (default 1). The signal is clipped to ±1 after it.
@@ -208,8 +213,10 @@ impl Audio {
             .filter(|(id, bus)| wanted.get(id) != Some(bus))
             .map(|(id, bus)| (*id, *bus))
             .collect();
+        // A radio leaving a bus stops hearing whoever it was hearing there.
+        let events = engine.events.clone();
         for (id, bus) in stale {
-            engine.bus(bus).remove_radio(id.0);
+            engine.bus(bus).remove_radio(id.0, report_rx(&events));
         }
         for (id, radio) in radios.iter().filter(|(_, r)| r.rx) {
             let bus = engine.bus(radio.output.bus);

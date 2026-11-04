@@ -33,6 +33,8 @@ pub struct Fake {
     pub allocations: AtomicU32,
     pub releases: AtomicU32,
     pub heartbeats: AtomicU32,
+    /// Sequence numbers of every datagram accepted from the client, across sessions.
+    pub sequences: Mutex<Vec<u64>>,
     /// Reply to heartbeats with `HA`.
     pub answer_heartbeats: AtomicBool,
     /// Ignore every datagram.
@@ -281,7 +283,9 @@ async fn voice_loop(fake: Arc<Fake>, udp: Arc<UdpSocket>) {
         let reply = {
             let mut channel = fake.channel.lock().unwrap();
             let Some(channel) = channel.as_mut() else { continue };
+            let Ok(sequence) = channel.codec().open(&buf[..len]).map(|o| o.sequence) else { continue };
             let Ok(message) = channel.open(&buf[..len]) else { continue };
+            fake.sequences.lock().unwrap().push(sequence);
             *fake.client.lock().unwrap() = Some(from);
             match message {
                 Message::Heartbeat(_) => {

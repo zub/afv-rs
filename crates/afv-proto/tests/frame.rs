@@ -84,6 +84,20 @@ fn transmit_sequence_increments() {
 }
 
 #[test]
+fn a_continuing_channel_picks_up_the_sequence() {
+    let cfg = config();
+    let mut first = Channel::new(&cfg);
+    for _ in 0..3 {
+        first.seal(&Heartbeat { callsign: "X".into() }).unwrap();
+    }
+    assert_eq!(first.next_sequence(), 3);
+    let mut next = Channel::continuing(&cfg, first.next_sequence());
+    let dg = next.seal(&Heartbeat { callsign: "X".into() }).unwrap();
+    assert_eq!(Codec::new(&cfg.peer()).open(&dg).unwrap().sequence, 3);
+    assert_eq!(next.next_sequence(), 4);
+}
+
+#[test]
 fn replay_is_rejected() {
     let cfg = config();
     let mut client = Channel::new(&cfg);

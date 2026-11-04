@@ -275,6 +275,46 @@ async fn received_audio_is_played_and_reported_per_radio() {
 }
 
 #[tokio::test]
+async fn turning_rx_off_mid_reception_ends_it() {
+    let server = FakeServer::start().await;
+    let client = server.client_builder().connect().await.unwrap();
+    let mut events = client.events();
+    client.set_position(POS);
+    let com1 = client.add_radio(RadioConfig::pilot(freq("122.800")));
+    wait_event(&mut events, |e| matches!(e, Event::TransceiversSynced)).await;
+    eventually("a heartbeat", || server.fake.heartbeats.load(SeqCst) > 0).await;
+
+    let mut encoder = Encoder::new().unwrap();
+    let audio = client.audio();
+    let mut out = vec![0.0; 960 * 2];
+    let mut heard = Vec::new();
+    // The talker keeps transmitting throughout; only the radio changes.
+    for i in 0..30u32 {
+        server
+            .send_audio(&AudioRx {
+                callsign: "NAX45F".into(),
+                sequence: i,
+                audio: encoder.encode(&[0.1; 960]).unwrap().to_vec(),
+                last_packet: false,
+                transceivers: vec![RxTransceiver { id: 0, frequency: 122_800_000, distance_ratio: 1.0 }],
+            })
+            .await;
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        if i == 15 {
+            client.update_radio(com1, |r| r.rx = false);
+        }
+        audio.render(OutputBus::Headset, &mut out, 48_000, 2).unwrap();
+        heard.extend(std::iter::from_fn(|| events.try_next()).filter_map(|e| match e {
+            Event::RxStarted { radio, .. } if radio == com1 => Some((i, true)),
+            Event::RxEnded { radio, .. } if radio == com1 => Some((i, false)),
+            _ => None,
+        }));
+    }
+    assert!(matches!(heard[..], [(i, true), (15, false)] if i < 15), "{heard:?}");
+    client.disconnect().await;
+}
+
+#[tokio::test]
 async fn coupled_atc_radios_send_cross_couple_groups() {
     let server = FakeServer::start().await;
     let client = server.client_builder().timing(Timing::atc()).api_url(&server.api_url).connect().await.unwrap();
