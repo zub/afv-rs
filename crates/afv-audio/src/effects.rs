@@ -25,29 +25,6 @@ pub struct EffectSamples {
     pub hf_noise: Option<Samples>,
 }
 
-impl EffectSamples {
-    /// Loads the five afv-native effect files from a directory. Files that are missing are
-    /// skipped; files that exist but cannot be read are an error.
-    #[cfg(feature = "wav")]
-    pub fn load_dir(dir: impl AsRef<std::path::Path>) -> Result<Self, crate::wav::WavError> {
-        let dir = dir.as_ref();
-        let load = |name: &str| -> Result<Option<Samples>, crate::wav::WavError> {
-            let path = dir.join(name);
-            if !path.exists() {
-                return Ok(None);
-            }
-            crate::wav::load(&path).map(Some)
-        };
-        Ok(Self {
-            click: load("Click_f32.wav")?,
-            crackle: load("Crackle_f32.wav")?,
-            ac_bus: load("AC_Bus_f32.wav")?,
-            vhf_noise: load("WhiteNoise_f32.wav")?,
-            hf_noise: load("HF_WhiteNoise_f32.wav")?,
-        })
-    }
-}
-
 /// Plays a [`Samples`] buffer frame by frame, once or looping.
 #[derive(Debug, Clone)]
 pub struct SamplePlayer {

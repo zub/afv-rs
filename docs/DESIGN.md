@@ -72,7 +72,7 @@ let client = afv::Client::builder()
     .credentials(cid, password)
     .callsign("SAS123")
     .client_name("myclient/1.0")
-    .effects(EffectSamples::load_dir(dir)?)       // optional
+    .effects(effects)                             // optional EffectSamples, loaded by the caller
     .connect().await?;                            // auth + voice session; auto-reconnects
 
 client.set_position(Position { lat_deg, lon_deg, height_msl_m, height_agl_m });

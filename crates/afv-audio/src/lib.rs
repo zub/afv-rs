@@ -22,8 +22,6 @@ pub mod stream;
 #[cfg(test)]
 mod test_util;
 pub mod tx;
-#[cfg(feature = "wav")]
-pub mod wav;
 
 pub use bus::{Bus, RadioId};
 pub use codec::OpusError;

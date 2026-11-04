@@ -6,14 +6,8 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
-[features]
-default = ["wav"]
-## Load effect samples from WAV files.
-wav = ["dep:hound"]
-
 [dependencies]
 afv-proto.workspace = true
-hound = { workspace = true, optional = true }
 num-complex.workspace = true
 num-traits.workspace = true
 opus.workspace = true
@@ -22,6 +16,5 @@ rand_distr.workspace = true
 rubato.workspace = true
 thiserror.workspace = true
 
-[[example]]
-name = "render_double_tx"
-required-features = ["wav"]
+[dev-dependencies]
+hound.workspace = true

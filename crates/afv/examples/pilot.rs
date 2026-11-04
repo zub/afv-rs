@@ -10,6 +10,8 @@
 //! credentials it connects to `--api-url` with the fake server's test login, so it pairs with
 //! `cargo run -p afv --example fake_server`.
 
+mod common;
+
 use std::collections::HashMap;
 use std::process::ExitCode;
 
@@ -87,7 +89,7 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         _ => return Err("set AFV_CID and AFV_PASSWORD, or --api-url for a fake server".into()),
     };
     let effects = match &args.effects {
-        Some(dir) => EffectSamples::load_dir(dir)?,
+        Some(dir) => common::load_effects(dir.as_ref())?,
         None => EffectSamples::default(),
     };
     let mut builder = Client::builder()

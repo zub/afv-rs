@@ -94,12 +94,30 @@ fn render(
     Ok(())
 }
 
+/// Loads a 48 kHz WAV file as mono, averaging channels.
+fn load(path: &Path) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
+    let reader = hound::WavReader::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let spec = reader.spec();
+    if spec.sample_rate != afv_audio::SAMPLE_RATE {
+        return Err(format!("{}: {} Hz, expected 48000 Hz", path.display(), spec.sample_rate).into());
+    }
+    let samples: Vec<f32> = match spec.sample_format {
+        hound::SampleFormat::Float => reader.into_samples::<f32>().collect::<Result<_, _>>()?,
+        hound::SampleFormat::Int => {
+            let scale = 1.0 / (1u64 << (spec.bits_per_sample - 1)) as f32;
+            reader.into_samples::<i32>().map(|s| s.map(|v| v as f32 * scale)).collect::<Result<_, _>>()?
+        }
+    };
+    let channels = spec.channels.max(1) as usize;
+    Ok(samples.chunks(channels).map(|c| c.iter().sum::<f32>() / channels as f32).collect())
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<PathBuf> = std::env::args_os().skip(1).map(PathBuf::from).collect();
     let [a, b, out] = args.as_slice() else {
         return Err("usage: render_double_tx A.wav B.wav OUT_DIR".into());
     };
-    let (a, b) = (afv_audio::wav::load(a)?, afv_audio::wav::load(b)?);
+    let (a, b) = (load(a)?, load(b)?);
     std::fs::create_dir_all(out)?;
     let t = |callsign, audio, start_frame, distance_ratio| Talker { callsign, audio, start_frame, distance_ratio };
     let fair = HfConditions::FAIR;
