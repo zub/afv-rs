@@ -1,0 +1,62 @@
+[package]
+name = "afv-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+arbitrary = { version = "1", features = ["derive"] }
+afv-proto = { path = "../crates/afv-proto" }
+afv-audio = { path = "../crates/afv-audio" }
+
+# Not part of the main workspace.
+[workspace]
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "datagram"
+path = "fuzz_targets/datagram.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "plaintext"
+path = "fuzz_targets/plaintext.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "jitter"
+path = "fuzz_targets/jitter.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "bus"
+path = "fuzz_targets/bus.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "convert"
+path = "fuzz_targets/convert.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "token"
+path = "fuzz_targets/token.rs"
+test = false
+doc = false
+bench = false
