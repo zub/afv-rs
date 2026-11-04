@@ -60,6 +60,11 @@ mod marker {
 
 use marker::*;
 
+/// Deepest nesting [`Reader::skip`] follows. The protocol nests three levels (a DTO, its
+/// transceiver list, one transceiver); anything far deeper is hostile, and following it would
+/// recurse without bound.
+const MAX_SKIP_DEPTH: usize = 32;
+
 pub(crate) fn write_array_len(out: &mut Vec<u8>, len: usize) -> Result<()> {
     if len <= FIX_COLLECTION_LEN as usize {
         out.push(FIXARRAY | len as u8);
@@ -156,6 +161,10 @@ impl<'a> Reader<'a> {
         Ok(self.take(1)?[0])
     }
 
+    fn remaining(&self) -> usize {
+        self.buf.len() - self.pos
+    }
+
     fn peek(&self) -> Result<u8> {
         self.buf.get(self.pos).copied().ok_or(Error::Truncated)
     }
@@ -176,7 +185,9 @@ impl<'a> Reader<'a> {
         Ok(u32::from_be_bytes(self.be()?) as usize)
     }
 
-    /// Reads an array header and checks it has at least `min` elements.
+    /// Reads an array header and checks it has at least `min` elements. Every element takes at
+    /// least one byte, so a length beyond the bytes left is truncated input; rejecting it here
+    /// lets callers size buffers by the length without trusting it.
     pub(crate) fn array(&mut self, min: u32) -> Result<u32> {
         let m = self.byte()?;
         let len = match m {
@@ -187,6 +198,9 @@ impl<'a> Reader<'a> {
         };
         if len < min {
             return Err(Error::ArrayTooShort { expected: min, found: len });
+        }
+        if len as usize > self.remaining() {
+            return Err(Error::Truncated);
         }
         Ok(len)
     }
@@ -262,6 +276,10 @@ impl<'a> Reader<'a> {
 
     /// Skips one complete value of any type.
     pub(crate) fn skip(&mut self) -> Result<()> {
+        self.skip_at(0)
+    }
+
+    fn skip_at(&mut self, depth: usize) -> Result<()> {
         let m = self.byte()?;
         // Bytes of data to skip, and nested values to skip after them (a map entry is two).
         let (skip_bytes, children): (usize, usize) = match m {
@@ -293,8 +311,14 @@ impl<'a> Reader<'a> {
             NEVER_USED => return Err(Error::UnexpectedType { expected: "any value", marker: m }),
         };
         self.take(skip_bytes)?;
+        if children > 0 && depth == MAX_SKIP_DEPTH {
+            return Err(Error::TooDeep);
+        }
+        if children > self.remaining() {
+            return Err(Error::Truncated);
+        }
         for _ in 0..children {
-            self.skip()?;
+            self.skip_at(depth + 1)?;
         }
         Ok(())
     }
@@ -347,6 +371,33 @@ mod tests {
         let mut r = Reader::new(&data);
         r.skip().unwrap();
         assert_eq!(r.uint::<u8>("test").unwrap(), 7);
+    }
+
+    #[test]
+    fn array_longer_than_the_input_is_truncated() {
+        // Five bytes claiming u32::MAX elements: rejected before anyone allocates for them.
+        let mut r = Reader::new(&[0xdd, 0xff, 0xff, 0xff, 0xff]);
+        assert!(matches!(r.array(0), Err(Error::Truncated)));
+        let mut r = Reader::new(&[0xdf, 0xff, 0xff, 0xff, 0xff]);
+        assert!(matches!(r.skip(), Err(Error::Truncated)), "same for maps");
+        let mut r = Reader::new(&[0x92, 0x01, 0x02]);
+        assert_eq!(r.array(0).unwrap(), 2, "a length that fits is fine");
+    }
+
+    #[test]
+    fn skip_stops_at_hostile_nesting() {
+        let deep = |levels: usize| [vec![0x91; levels], vec![0x00]].concat();
+        assert!(Reader::new(&deep(MAX_SKIP_DEPTH)).skip().is_ok());
+        assert!(matches!(Reader::new(&deep(MAX_SKIP_DEPTH + 1)).skip(), Err(Error::TooDeep)));
+        // As deep as a datagram allows, on a small stack: an error, not a stack overflow.
+        let input = deep(65_000);
+        let result = std::thread::Builder::new()
+            .stack_size(64 * 1024)
+            .spawn(move || matches!(Reader::new(&input).skip(), Err(Error::TooDeep)))
+            .unwrap()
+            .join()
+            .unwrap();
+        assert!(result);
     }
 
     #[test]

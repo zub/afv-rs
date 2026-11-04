@@ -10,6 +10,8 @@ pub enum Error {
     ArrayTooShort { expected: u32, found: u32 },
     #[error("integer out of range for {0}")]
     IntegerOutOfRange(&'static str),
+    #[error("msgpack value nested too deeply")]
+    TooDeep,
     #[error("string is not valid UTF-8")]
     InvalidUtf8,
     #[error("{0} is too large to encode")]
