@@ -29,7 +29,8 @@ crates/
               (rubato). Example: render_double_tx.
   afv         the client: REST + UDP session (tokio, reqwest/rustls), radio model,
               transceiver sync, PTT gating, audio engine, real-time bridge, events.
-              feature "cpal": device I/O backend. Examples: pilot, fake_server (with echo).
+              feature "cpal": device I/O backend. Examples: pilot (cpal), atc (own devices),
+              fake_server (with echo).
 ```
 
 `afv-proto` and `afv-audio` have no async runtime dependency and are testable in isolation.
