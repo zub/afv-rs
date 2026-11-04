@@ -101,15 +101,33 @@ impl JitterBuffer {
         {
             return false;
         }
-        if let Some(next) = self.next {
-            let ahead = diff(sequence, next);
-            if ahead < 0 {
-                self.target = (self.target + 1).min(MAX_TARGET);
-                return false;
+        // Every buffered packet stays within one ring's span: of the play position while playing,
+        // of each other while buffering. Otherwise the oldest packet is not well defined, and
+        // catching up from it in `pop` could walk billions of sequences.
+        match self.next {
+            Some(next) => {
+                let ahead = diff(sequence, next);
+                if ahead < 0 {
+                    self.target = (self.target + 1).min(MAX_TARGET);
+                    return false;
+                }
+                if ahead as usize >= CAPACITY {
+                    // Too far ahead to be the same stream position: start over from here.
+                    self.reset();
+                }
             }
-            if ahead as usize >= CAPACITY {
-                // Too far ahead to be the same stream position: start over from here.
-                self.reset();
+            None => {
+                if let Some((oldest, newest)) = self.span() {
+                    if diff(sequence, oldest) >= 0 {
+                        if diff(sequence, oldest) as usize >= CAPACITY {
+                            // Far ahead of everything buffered: start over from here.
+                            self.reset();
+                        }
+                    } else if diff(newest, sequence) as usize >= CAPACITY {
+                        // Far behind everything buffered: a straggler.
+                        return false;
+                    }
+                }
             }
         }
         let slot = &mut self.slots[sequence as usize % CAPACITY];
@@ -117,7 +135,8 @@ impl JitterBuffer {
             if slot.sequence == sequence {
                 return false;
             }
-            // Only possible while buffering: an older packet still occupies the slot.
+            // Cannot happen while packets stay within one span of the ring; if it did, the newer
+            // packet replaces the older one without corrupting the count.
             self.buffered -= 1;
         }
         slot.sequence = sequence;
@@ -131,8 +150,13 @@ impl JitterBuffer {
         true
     }
 
-    fn oldest(&self) -> Option<u32> {
-        self.slots.iter().filter(|s| s.filled).map(|s| s.sequence).reduce(|a, b| if diff(a, b) < 0 { a } else { b })
+    /// The oldest and newest buffered sequences.
+    fn span(&self) -> Option<(u32, u32)> {
+        let mut filled = self.slots.iter().filter(|s| s.filled).map(|s| s.sequence);
+        let first = filled.next()?;
+        Some(filled.fold((first, first), |(oldest, newest), s| {
+            (if diff(s, oldest) < 0 { s } else { oldest }, if diff(s, newest) > 0 { s } else { newest })
+        }))
     }
 
     /// Takes the packet for the next 20 ms frame.
@@ -143,7 +167,7 @@ impl JitterBuffer {
                 if self.buffered < self.target && self.end.is_none() {
                     return Pop::NotReady;
                 }
-                let Some(oldest) = self.oldest() else { return Pop::NotReady };
+                let Some((oldest, _)) = self.span() else { return Pop::NotReady };
                 oldest
             }
         };
@@ -347,6 +371,73 @@ mod tests {
         jb.push(1, &pkt(1), false);
         assert_eq!(jb.pop(), Pop::Packet(&pkt(0)));
         assert_eq!(jb.target(), MIN_TARGET, "not counted as late");
+    }
+
+    #[test]
+    fn a_burst_far_ahead_while_buffering_starts_over() {
+        // One stray packet, then a burst half the counter away, all before the first pop. Keeping
+        // the stray made `pop` walk two billion sequences to catch up with the burst.
+        let mut jb = JitterBuffer::new();
+        jb.push(0, &pkt(0), false);
+        for s in 0x7fff_fff0..0x7fff_fff8 {
+            jb.push(s, &pkt(s), false);
+        }
+        assert_eq!(jb.len(), 8, "the stray is dropped");
+        assert_eq!(jb.pop(), Pop::Packet(&pkt(0x7fff_fff2)), "then the backlog is skipped as usual");
+    }
+
+    #[test]
+    fn a_straggler_far_behind_while_buffering_is_dropped() {
+        let mut jb = JitterBuffer::new();
+        jb.push(1000, &pkt(1000), false);
+        assert!(!jb.push(1000 - CAPACITY as u32, &pkt(0), false));
+        assert!(jb.push(1001 - CAPACITY as u32, &pkt(1001 - CAPACITY as u32), false), "just inside the span");
+        assert_eq!(jb.len(), 2);
+        assert_eq!(jb.pop(), Pop::Packet(&pkt(1001 - CAPACITY as u32)));
+    }
+
+    #[test]
+    fn sequences_spread_over_the_whole_counter_keep_the_newest_run() {
+        // Three packets a third of the counter apart: no single oldest packet exists among them.
+        let mut jb = JitterBuffer::new();
+        for s in [0, 0x5555_5556, 0xaaaa_aaac, 1, 2, 3, 4, 5] {
+            jb.push(s, &pkt(s), false);
+        }
+        assert_eq!(jb.len(), 5);
+        assert_eq!(jb.pop(), Pop::Packet(&pkt(1)));
+    }
+
+    /// Arbitrary sequences, as a hostile sender could choose them: buffered packets always stay
+    /// within one span of the ring, which bounds the catch-up in `pop` to one lap.
+    #[test]
+    fn arbitrary_sequences_stay_within_one_span() {
+        use rand::{RngExt, SeedableRng};
+        let mut rng = rand::rngs::SmallRng::seed_from_u64(2);
+        let mut jb = JitterBuffer::new();
+        let mut base = 0u32;
+        for _ in 0..20_000 {
+            match rng.random_range(0..10) {
+                0 => base = rng.random(),
+                1..=6 => {
+                    let s = base.wrapping_add(rng.random_range(0..200)).wrapping_sub(100);
+                    jb.push(s, &pkt(s), rng.random_range(0..20) == 0);
+                }
+                7 => {
+                    let s: u32 = rng.random();
+                    jb.push(s, &pkt(s), false);
+                }
+                _ => {
+                    jb.pop();
+                }
+            }
+            if let Some((oldest, newest)) = jb.span() {
+                assert!((0..CAPACITY as i32).contains(&diff(newest, oldest)), "{oldest}..{newest}");
+                if let Some(next) = jb.next {
+                    assert!((0..CAPACITY as i32).contains(&diff(oldest, next)), "{oldest} vs next {next}");
+                }
+            }
+            assert_eq!(jb.len(), jb.slots.iter().filter(|s| s.filled).count() as u32);
+        }
     }
 
     /// Random reordering, loss and duplication around a moving play position.
