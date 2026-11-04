@@ -49,6 +49,10 @@ pub struct Fake {
     pub posts_at_release: Mutex<Option<usize>>,
     /// Answer transceiver posts with HTTP 500.
     pub fail_transceivers: AtomicBool,
+    /// Allocate callsigns on a voice server address the client cannot open.
+    pub bad_voice_address: AtomicBool,
+    /// Delay before answering allocations (counted on arrival).
+    pub allocate_delay_ms: AtomicU64,
     pub cross_couple_posts: Mutex<Vec<Vec<CrossCoupleGroup>>>,
     pub audio: Mutex<Vec<AudioTx>>,
     /// Play each transmission back to the sender as station `ECHO` once it ends.
@@ -196,8 +200,14 @@ async fn allocate(State((fake, udp_addr)): AppState, headers: HeaderMap) -> Resp
     let n = fake.allocations.fetch_add(1, SeqCst) as u8 + 1;
     let config = ChannelConfig::new(format!("tag-{n}"), [n; 32], [n.wrapping_add(100); 32]);
     *fake.channel.lock().unwrap() = Some(Channel::new(&config.peer()));
+    let delay = fake.allocate_delay_ms.load(SeqCst);
+    if delay > 0 {
+        tokio::time::sleep(Duration::from_millis(delay)).await;
+    }
+    // No port: fails to resolve at once, without a DNS lookup.
+    let address = if fake.bad_voice_address.load(SeqCst) { udp_addr.ip().to_string() } else { udp_addr.to_string() };
     Json(PostCallsignResponse {
-        voice_server: VoiceServer { address_ipv4: udp_addr.to_string(), address_ipv6: None, channel_config: config },
+        voice_server: VoiceServer { address_ipv4: address, address_ipv6: None, channel_config: config },
     })
     .into_response()
 }

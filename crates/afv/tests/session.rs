@@ -195,6 +195,41 @@ async fn dropping_the_session_releases_the_callsign() {
 }
 
 #[tokio::test]
+async fn a_failed_connect_releases_the_allocated_callsign() {
+    let server = FakeServer::start().await;
+    server.fake.bad_voice_address.store(true, SeqCst);
+    assert!(server.builder().connect().await.is_err());
+    assert_eq!(server.fake.allocations.load(SeqCst), 1);
+    assert_eq!(server.fake.releases.load(SeqCst), 1, "allocated, then the link failed to open");
+}
+
+#[tokio::test]
+async fn failed_reconnects_release_their_callsigns() {
+    let server = FakeServer::start().await;
+    let session = server.builder().connect().await.unwrap();
+    server.fake.bad_voice_address.store(true, SeqCst);
+    server.fake.answer_heartbeats.store(false, SeqCst);
+    eventually("several failed reconnects", || server.fake.allocations.load(SeqCst) >= 4).await;
+    server.fake.bad_voice_address.store(false, SeqCst);
+    server.fake.answer_heartbeats.store(true, SeqCst);
+    wait_state(&session, |s| matches!(s, SessionState::Connected)).await;
+    let (allocations, releases) = (server.fake.allocations.load(SeqCst), server.fake.releases.load(SeqCst));
+    assert_eq!(releases, allocations - 1, "every callsign but the current one was released");
+}
+
+#[tokio::test]
+async fn shutdown_during_an_allocation_releases_the_callsign() {
+    let server = FakeServer::start().await;
+    let session = server.builder().connect().await.unwrap();
+    server.fake.allocate_delay_ms.store(1000, SeqCst);
+    server.fake.answer_heartbeats.store(false, SeqCst);
+    // The reconnect's allocation has reached the server, which has yet to answer.
+    eventually("the reconnect to allocate", || server.fake.allocations.load(SeqCst) == 2).await;
+    session.disconnect().await;
+    assert_eq!(server.fake.releases.load(SeqCst), 2, "the lost link's callsign and the pending one");
+}
+
+#[tokio::test]
 async fn station_lookups() {
     let server = FakeServer::start().await;
     let session = server.builder().connect().await.unwrap();

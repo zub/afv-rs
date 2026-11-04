@@ -73,6 +73,9 @@ impl Shared {
     /// Logs in, allocates a voice session and opens the UDP link.
     pub(super) async fn establish(&self) -> Result<Established> {
         let token_refresh = self.api.authenticate().await?;
+        // From here on the server may hold the callsign, even if the request fails or this
+        // future is dropped before the reply: `release` must then give it back.
+        self.allocated.store(true, Ordering::Relaxed);
         let server = self.api.allocate_voice_session().await?;
         // Keep numbering datagrams where the previous link stopped: harmless if the server forgot
         // the old session, and needed if it did not.
@@ -98,7 +101,7 @@ impl Shared {
                     match self.reconnect(reason, &mut shutdown).await {
                         Ok(next) => established = next,
                         Err(Some(e)) => {
-                            self.api.clear_token();
+                            self.teardown().await;
                             self.set_state(SessionState::Disconnected(Some(Arc::new(e))));
                             return;
                         }
@@ -117,11 +120,14 @@ impl Shared {
     }
 
     /// Closes the link and releases the callsign on the server, once no post is in progress.
-    async fn release(&self) {
+    pub(super) async fn release(&self) {
         let _posting = self.posting.lock().await;
-        let Some(link) = self.link.lock().unwrap().take() else { return };
-        self.next_tx_sequence.store(link.channel.next_sequence(), Ordering::Relaxed);
-        drop(link);
+        if let Some(link) = self.link.lock().unwrap().take() {
+            self.next_tx_sequence.store(link.channel.next_sequence(), Ordering::Relaxed);
+        }
+        if !self.allocated.swap(false, Ordering::Relaxed) {
+            return;
+        }
         if let Err(e) = self.api.release_voice_session().await {
             tracing::debug!("releasing callsign failed: {e}");
         }
@@ -144,7 +150,11 @@ impl Shared {
             match result {
                 Ok(established) => return Ok(established),
                 Err(e) if e.is_fatal() => return Err(Some(e)),
-                Err(e) => tracing::warn!(attempt, "reconnect failed: {e}"),
+                Err(e) => {
+                    tracing::warn!(attempt, "reconnect failed: {e}");
+                    // A callsign allocated before the failure is not left on the server.
+                    self.release().await;
+                }
             }
             tokio::select! {
                 _ = shutdown.changed() => return Err(None),

@@ -134,7 +134,14 @@ impl Session {
 
     async fn connect(config: Config) -> Result<Self> {
         let shared = Arc::new(Shared::new(config)?);
-        let established = shared.establish().await?;
+        let established = match shared.establish().await {
+            Ok(established) => established,
+            Err(e) => {
+                // E.g. the callsign was allocated but the voice server is unreachable.
+                shared.release().await;
+                return Err(e);
+            }
+        };
         let (shutdown, shutdown_rx) = watch::channel(false);
         let task = tokio::spawn(shared.clone().run(established, shutdown_rx));
         Ok(Self { shared, shutdown, task })
