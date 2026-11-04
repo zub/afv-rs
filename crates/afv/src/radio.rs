@@ -205,6 +205,17 @@ impl Plan {
         plan
     }
 
+    /// The transmitting ids that mean the same frequency in `self` and in `previous`: safe to
+    /// transmit on whichever of the two the server holds.
+    pub fn stable_tx(&self, previous: &Plan) -> Vec<u16> {
+        let frequency = |plan: &Plan, id: u16| plan.transceivers.iter().find(|t| t.id == id).map(|t| t.frequency);
+        self.tx
+            .iter()
+            .copied()
+            .filter(|&id| previous.tx.contains(&id) && frequency(self, id) == frequency(previous, id))
+            .collect()
+    }
+
     /// Whether the server's view differs: everything except positions, which only need to reach
     /// the server with the next periodic refresh.
     pub fn differs_from(&self, other: &Plan) -> bool {

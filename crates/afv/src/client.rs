@@ -300,6 +300,11 @@ impl Inner {
                 return true;
             }
             state.in_flight = true;
+            // Ids are positions, so the update can give a transmitting id another frequency. The
+            // server applies it before its reply arrives; until then, transmit only on ids that
+            // mean the same frequency either way, so no audio goes out on a frequency nobody
+            // selected.
+            self.audio.set_tx_transceivers(&plan.stable_tx(&state.acked));
             let groups = match &plan.groups {
                 Some(groups) => Some(groups.clone()),
                 None if state.coupling_sent => Some(vec![CrossCoupleGroup { id: 0, transceiver_ids: vec![] }]),

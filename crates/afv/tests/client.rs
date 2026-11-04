@@ -221,6 +221,78 @@ async fn moving_tx_to_another_radio_transmits_there() {
     client.disconnect().await;
 }
 
+/// Opens PTT on a synced client, then makes `change` while the server sits on the resulting
+/// update; returns the transceiver lists of the audio sent while the update was in flight, and
+/// after it was accepted.
+async fn transmit_across_update(
+    radios: &[RadioConfig],
+    change: impl FnOnce(&afv::Client, &[afv::radio::RadioId]),
+) -> (Vec<Vec<u16>>, Vec<Vec<u16>>) {
+    let server = FakeServer::start().await;
+    let client = server.client_builder().connect().await.unwrap();
+    let mut events = client.events();
+    client.set_position(POS);
+    let ids: Vec<_> = radios.iter().map(|r| client.add_radio(r.clone())).collect();
+    client.set_ptt(true);
+    wait_event(&mut events, |e| matches!(e, Event::PttOpened)).await;
+    let audio = client.audio();
+    let frames = |n: usize| (0..n).for_each(|_| audio.capture(&[0.1; 960], 48_000, 1).unwrap());
+    frames(3);
+    eventually("audio before the change", || server.fake.audio.lock().unwrap().len() >= 3).await;
+
+    server.fake.transceiver_delay_ms.store(300, SeqCst);
+    let posts = server.transceiver_post_count();
+    change(&client, &ids);
+    // The server has the update and is still to answer.
+    eventually("the update to arrive", || server.transceiver_post_count() > posts).await;
+    let before = server.fake.audio.lock().unwrap().len();
+    frames(5);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let during: Vec<_> = server.fake.audio.lock().unwrap()[before..].iter().map(|a| a.transceivers.clone()).collect();
+    assert_eq!(server.fake.transceiver_posts_in_flight.load(SeqCst), 1, "still in flight");
+
+    wait_event(&mut events, |e| matches!(e, Event::TransceiversSynced)).await;
+    let before = server.fake.audio.lock().unwrap().len();
+    frames(5);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let after: Vec<_> = server.fake.audio.lock().unwrap()[before..].iter().map(|a| a.transceivers.clone()).collect();
+    assert!(client.ptt_open());
+    client.disconnect().await;
+    (during, after)
+}
+
+#[tokio::test]
+async fn removing_the_tx_radio_mid_transmission_never_sends_on_its_reused_id() {
+    // COM1 (tx) is id 0; once it is gone, COM2 (receive only) takes id 0.
+    let (during, after) =
+        transmit_across_update(&[tx_radio("122.800"), RadioConfig::pilot(freq("121.500"))], |c, ids| {
+            c.remove_radio(ids[0]);
+        })
+        .await;
+    assert_eq!(during, Vec::<Vec<u16>>::new(), "id 0 already means 121.500 on the server");
+    assert_eq!(after, Vec::<Vec<u16>>::new(), "no radio transmits");
+}
+
+#[tokio::test]
+async fn retuning_the_tx_radio_mid_transmission_pauses_until_the_server_knows() {
+    let (during, after) = transmit_across_update(&[tx_radio("122.800")], |c, ids| {
+        c.update_radio(ids[0], |r| r.frequency = freq("121.500"));
+    })
+    .await;
+    assert_eq!(during, Vec::<Vec<u16>>::new());
+    assert_eq!(after, vec![vec![0u16]; 5], "transmits on the new frequency once accepted");
+}
+
+#[tokio::test]
+async fn adding_a_receiver_mid_transmission_does_not_interrupt_it() {
+    let (during, after) = transmit_across_update(&[tx_radio("122.800")], |c, _| {
+        c.add_radio(RadioConfig::pilot(freq("121.500")));
+    })
+    .await;
+    assert_eq!(during, vec![vec![0u16]; 5], "id 0 keeps its frequency");
+    assert_eq!(after, vec![vec![0u16]; 5]);
+}
+
 #[tokio::test]
 async fn received_audio_is_played_and_reported_per_radio() {
     let server = FakeServer::start().await;
