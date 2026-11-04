@@ -38,14 +38,13 @@ mod channel;
 pub(crate) use atmospherics::Atmospherics;
 pub use channel::HfChannel;
 
-// The noise floors of the presets, 40, 26 and 16 dB signal-to-noise. ITU-R F.339 (quoted in
-// F.240) grades SSB telephony by the least signal-to-noise each grade needs: 33 dB for good commercial quality,
+// Noise floors, 43, 29, 19 and 14 dB signal-to-noise. ITU-R F.339 (quoted in F.240) grades SSB
+// telephony by the least signal-to-noise each grade needs: 33 dB for good commercial quality,
 // 15 dB for marginally commercial and 6 dB for just usable. Circuits are planned to do better than
 // their grade's minimum, so GOOD sits well above good commercial, FAIR between the two commercial
-// grades and POOR at marginally commercial. Just usable is a `noise_level` of 0.5.
-const GOOD_NOISE: f32 = 0.01;
-const FAIR_NOISE: f32 = 0.05;
-const POOR_NOISE: f32 = 0.16;
+// grades, POOR just above marginally commercial and ABYSMAL just below it. Just usable is a
+// `noise_level` of 0.5.
+
 // Sounders under every preset but OFF. They are transmitters of their own, sweeping the whole
 // band, so how many pass and how loud does not depend on the station heard.
 const SOUNDER_RATE_HZ: f32 = 0.1;
@@ -105,13 +104,13 @@ impl HfConditions {
     };
     /// About as good as HF gets: Watterson's "good" channel with a steady component left in.
     pub const GOOD: Self = Self {
-        offset_hz: 40.0,
-        drift_hz: 5.0,
+        offset_hz: 25.0,
+        drift_hz: 3.0,
         multipath_delay_ms: 0.5,
         fading_rate_hz: 0.1,
         fading_depth: 0.8,
         slow_fading_db: 2.0,
-        noise_level: GOOD_NOISE,
+        noise_level: 0.007,
         crackle_rate_hz: 0.5,
         crackle_level: 0.3,
         sounder_rate_hz: SOUNDER_RATE_HZ,
@@ -119,13 +118,13 @@ impl HfConditions {
     };
     /// Typical conditions, and the default: Watterson's "moderate" channel.
     pub const FAIR: Self = Self {
-        offset_hz: 200.0,
-        drift_hz: 25.0,
+        offset_hz: 100.0,
+        drift_hz: 15.0,
         multipath_delay_ms: 1.0,
         fading_rate_hz: 0.5,
         fading_depth: 1.0,
-        slow_fading_db: 9.0,
-        noise_level: FAIR_NOISE,
+        slow_fading_db: 8.0,
+        noise_level: 0.035,
         crackle_rate_hz: 2.0,
         crackle_level: 0.6,
         sounder_rate_hz: SOUNDER_RATE_HZ,
@@ -133,27 +132,42 @@ impl HfConditions {
     };
     /// Watterson's "poor" channel, badly tuned, with frequent static.
     pub const POOR: Self = Self {
-        offset_hz: 500.0,
-        drift_hz: 60.0,
+        offset_hz: 250.0,
+        drift_hz: 40.0,
         multipath_delay_ms: 2.0,
         fading_rate_hz: 1.0,
         fading_depth: 1.0,
-        slow_fading_db: 14.0,
-        noise_level: POOR_NOISE,
+        slow_fading_db: 12.0,
+        noise_level: 0.11,
         crackle_rate_hz: 6.0,
+        crackle_level: 1.0,
+        sounder_rate_hz: SOUNDER_RATE_HZ,
+        sounder_level: SOUNDER_LEVEL,
+    };
+    /// Worse than Watterson's channels: ITU-R F.1487's low-latitude moderate channel (faster
+    /// fading than "poor"), far off tune, below commercial quality, with a storm nearby.
+    pub const ABYSMAL: Self = Self {
+        offset_hz: 375.0,
+        drift_hz: 50.0,
+        multipath_delay_ms: 2.0,
+        fading_rate_hz: 1.5,
+        fading_depth: 1.0,
+        slow_fading_db: 16.0,
+        noise_level: 0.2,
+        crackle_rate_hz: 10.0,
         crackle_level: 1.0,
         sounder_rate_hz: SOUNDER_RATE_HZ,
         sounder_level: SOUNDER_LEVEL,
     };
     /// Watterson's "flutter" channel: fast fading as on polar routes.
     pub const FLUTTER: Self = Self {
-        offset_hz: 200.0,
-        drift_hz: 25.0,
+        offset_hz: 100.0,
+        drift_hz: 15.0,
         multipath_delay_ms: 0.5,
         fading_rate_hz: 10.0,
         fading_depth: 1.0,
         slow_fading_db: 9.0,
-        noise_level: FAIR_NOISE,
+        noise_level: 0.035,
         crackle_rate_hz: 2.0,
         crackle_level: 0.6,
         sounder_rate_hz: SOUNDER_RATE_HZ,

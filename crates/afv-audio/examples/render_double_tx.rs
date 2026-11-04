@@ -19,11 +19,12 @@ use afv_proto::voice::RxTransceiver;
 const VHF: u32 = 118_500_000;
 /// A North Atlantic HF frequency.
 const HF: u32 = 8_891_000;
-const HF_PRESETS: [(&str, HfConditions); 5] = [
+const HF_PRESETS: [(&str, HfConditions); 6] = [
     ("off", HfConditions::OFF),
     ("good", HfConditions::GOOD),
     ("fair", HfConditions::FAIR),
     ("poor", HfConditions::POOR),
+    ("abysmal", HfConditions::ABYSMAL),
     ("flutter", HfConditions::FLUTTER),
 ];
 /// Background kept after the last transmission, in frames: HF has no squelch, so 4 s of the band

@@ -52,7 +52,7 @@ impl Arrivals {
 const MAX_BURSTS: usize = 8;
 /// Peak amplitude of the loudest impulse at level 1 relative to the voice level, before the
 /// receiver's filter (which spreads it into a far quieter blip).
-const CRACKLE_MAX_RELATIVE: f32 = 8.0;
+const CRACKLE_MAX_RELATIVE: f32 = 11.0;
 /// Impulse sizes, as a fraction of the loudest, follow a Pareto distribution from this smallest
 /// size with this shape: mostly near the smallest, with a long tail (capped at 1).
 const CRACKLE_SMALLEST: f64 = 0.1;

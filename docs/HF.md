@@ -24,8 +24,16 @@ make speech hard to follow.
 
 **Model.** Each station has its own fixed tuning error, drawn at random when it is first heard,
 anywhere within ±`offset_hz`. On top, the error drifts slowly by up to ±`drift_hz`, heading for a
-new random value every 2–6 seconds. The shift itself is done exactly: a Hilbert filter pair turns the audio
-into an "analytic" signal, which is then rotated by Δf.
+new random value every 2–6 seconds. The shift itself is done exactly: a Hilbert filter pair turns
+the audio into an "analytic" signal, which is then rotated by Δf.
+
+**How far off is realistic.** Aviation HF is channelised, so nobody tunes by ear; the error comes
+from the equipment and from motion. Regulations allow an aeronautical station 10 Hz and an aircraft
+20 Hz (FCC 47 CFR 87.133, matching the ITU Radio Regulations; ITU-R M.1458 for HF data link), so
+sets within tolerance are at most 30–40 Hz apart. An airliner's speed adds up to about 8 Hz of
+Doppler at 10 MHz and 15 Hz at 18 MHz, and the ionosphere a few hertz of slowly changing Doppler.
+`GOOD` stays close to that; the other presets go further, set by ear to the mistuned voices pilots
+and controllers report, as from sets out of tolerance.
 
 ## 2. Multipath fading: the watery, warbling sound
 
@@ -52,6 +60,7 @@ adopted by CCIR Recommendation 520 and ITU-R F.1487 for testing HF modems. It ha
 | Moderate | 1 ms | 0.5 Hz |
 | Poor | 2 ms | 1 Hz |
 | Flutter | 0.5 ms | 10 Hz |
+| ITU-R F.1487 low latitudes, moderate | 2 ms | 1.5 Hz |
 
 **Slow fading.** On top of that fast fading, the overall strength of an HF signal wanders by many
 decibels over tens of seconds to minutes, as the ionosphere's absorption and focusing change with
@@ -77,8 +86,8 @@ unfaded voice, both measured in a 300–3000 Hz voice channel: 1 is 0 dB signal-
 SSB telephony by the least signal-to-noise each grade needs (F.339, quoted in F.240): 33 dB for
 good commercial quality, 15 dB for marginally commercial and 6 dB for just usable. Circuits are
 planned to do better than their grade's minimum, so the presets sit inside the grades: `GOOD` at
-40 dB, `FAIR` at 26 dB (between the two commercial grades), `POOR` at 16 dB (marginally
-commercial). Just usable is a `noise_level` of 0.5. Measured as active speech against the noise
+43 dB, `FAIR` at 29 dB (between the two commercial grades), `POOR` at 19 dB (just above
+marginally commercial) and `ABYSMAL` at 14 dB (just below it). Just usable is a `noise_level` of 0.5. Measured as active speech against the noise
 at the output of the HF set (section 6), the setting and the result agree within about 1 dB.
 
 The set's hang AGC holds the gain between words, so the hiss does not swell in every pause. It
@@ -180,14 +189,15 @@ noise recording, if loaded, plays after the audio stage whenever the background 
 | | Offset | Drift | Path delay | Doppler spread | Depth | Slow fading | Noise | Crashes/s | Static | Sounders/s |
 |---|---|---|---|---|---|---|---|---|---|---|
 | `OFF` | 0 | 0 | — | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
-| `GOOD` | ±40 Hz | ±5 Hz | 0.5 ms | 0.1 Hz | 0.8 | 2 dB | 0.01 (40 dB S/N) | 0.5 | 0.3 | 0.1 |
-| `FAIR` (default) | ±200 Hz | ±25 Hz | 1 ms | 0.5 Hz | 1 | 9 dB | 0.05 (26 dB) | 2 | 0.6 | 0.1 |
-| `POOR` | ±500 Hz | ±60 Hz | 2 ms | 1 Hz | 1 | 14 dB | 0.16 (16 dB) | 6 | 1 | 0.1 |
-| `FLUTTER` | ±200 Hz | ±25 Hz | 0.5 ms | 10 Hz | 1 | 9 dB | 0.05 (26 dB) | 2 | 0.6 | 0.1 |
+| `GOOD` | ±25 Hz | ±3 Hz | 0.5 ms | 0.1 Hz | 0.8 | 2 dB | 0.007 (43 dB S/N) | 0.5 | 0.3 | 0.1 |
+| `FAIR` (default) | ±100 Hz | ±15 Hz | 1 ms | 0.5 Hz | 1 | 9 dB | 0.035 (29 dB) | 2 | 0.6 | 0.1 |
+| `POOR` | ±250 Hz | ±40 Hz | 2 ms | 1 Hz | 1 | 14 dB | 0.11 (19 dB) | 6 | 1 | 0.1 |
+| `ABYSMAL` | ±375 Hz | ±50 Hz | 2 ms | 1.5 Hz | 1 | 16 dB | 0.2 (14 dB) | 10 | 1 | 0.1 |
+| `FLUTTER` | ±100 Hz | ±15 Hz | 0.5 ms | 10 Hz | 1 | 9 dB | 0.035 (29 dB) | 2 | 0.6 | 0.1 |
 
-The fast fading follows Watterson's reference channels, and the noise floors sit within ITU-R's
-quality grades.
-The tuning offsets, slow fading, static and sounder figures are set by ear to match what pilots
+The fast fading follows Watterson's reference channels (and, for `ABYSMAL`, ITU-R F.1487's
+low-latitude moderate channel), and the noise floors sit within ITU-R's quality grades. The tuning
+offsets (section 1), slow fading, static and sounder figures are set by ear to match what pilots
 and controllers actually hear, not taken from measurements.
 
 ## Sources
@@ -196,7 +206,8 @@ and controllers actually hear, not taken from measurements.
   model"](https://forohistorico.coit.es/index.php/biblioteca/articulos-seminales/item/experimental-confirmation-of-an-hf-channel-model),
   IEEE Trans. Communication Technology 18(6), 1970: the model itself.
 - MathWorks, ["HF Ionospheric Channel Models"](https://www.mathworks.com/help/comm/ug/hf-ionospheric-channel-models.html):
-  a readable explanation of the Watterson model and its ITU-R F.1487 profiles.
+  a readable explanation of the Watterson model and its ITU-R F.1487 profiles, including the
+  low-latitude moderate channel (2 ms, 1.5 Hz).
 - W. Kelley (KC7WW), ["A Low-Cost HF Channel Simulator for Testing and Evaluating HF Digital
   Systems"](https://web.tapr.org/meetings/DCC_1999/DCC1999-HFchannelSimulator-KC7WW.pdf), TAPR DCC
   1999: the CCIR 520 good and poor channels in practice.
@@ -214,6 +225,9 @@ and controllers actually hear, not taken from measurements.
   and [F.339-8](https://www.itu.int/dms_pubrec/itu-r/rec/f/R-REC-F.339-8-201302-I!!PDF-E.pdf):
   33, 15 and 6 dB audio signal-to-noise for good commercial, marginally commercial and just usable
   SSB telephony.
+- US FCC, [47 CFR 87.133](https://hallikainen.org/org/FCC/FccRules/2006/87/133), frequency
+  tolerance (2006 edition), and ITU-R [Recommendation M.1458](https://www.itu.int/dms_pubrec/itu-r/rec/m/R-REC-M.1458-0-200005-I!!PDF-E.pdf):
+  10 Hz for aeronautical stations and 20 Hz for aircraft on HF single sideband.
 - Wikipedia, ["Donald Duck talk"](https://en.wikipedia.org/wiki/Donald_Duck_talk), and a 1970 Naval
   Postgraduate School report ([calhoun.nps.edu](https://calhoun.nps.edu/entities/publication/f341cc35-61c1-484b-a130-bbc41fa9e149))
   on how closely SSB can be tuned by ear (about 20–30 Hz).

@@ -526,8 +526,14 @@ mod tests {
     #[test]
     fn changing_conditions_mid_stream_does_not_click() {
         // Steps where the conditions change are no larger than the signal's own steps elsewhere.
-        let presets =
-            [HfConditions::POOR, HfConditions::OFF, HfConditions::FLUTTER, HfConditions::GOOD, HfConditions::FAIR];
+        let presets = [
+            HfConditions::OFF,
+            HfConditions::POOR,
+            HfConditions::FLUTTER,
+            HfConditions::ABYSMAL,
+            HfConditions::GOOD,
+            HfConditions::FAIR,
+        ];
         let mut ch = channel(9);
         let mut out = Vec::new();
         let mut frame = [0.0; FRAME_SAMPLES];
