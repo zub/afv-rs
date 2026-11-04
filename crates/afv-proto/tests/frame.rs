@@ -1,6 +1,6 @@
 use afv_proto::voice::{AudioRx, AudioTx, Heartbeat, RxTransceiver};
 use afv_proto::{Channel, ChannelConfig, Codec, Error, Message};
-use chacha20poly1305::aead::AeadInPlace;
+use chacha20poly1305::aead::AeadInOut;
 use chacha20poly1305::{ChaCha20Poly1305, KeyInit};
 
 fn config() -> ChannelConfig {
@@ -19,7 +19,7 @@ fn heartbeat_golden_datagram() {
     let mut plain = vec![0x01, 0x00, b'H', 0x06, 0x00, 0x91, 0xa4, b'T', b'E', b'S', b'T'];
     let nonce = [0u8; 12];
     let tag = ChaCha20Poly1305::new(&cfg.transmit_key.into())
-        .encrypt_in_place_detached(&nonce.into(), &aad, &mut plain)
+        .encrypt_inout_detached(&nonce.into(), &aad, plain.as_mut_slice().into())
         .unwrap();
 
     let mut expected = aad.to_vec();
@@ -37,11 +37,11 @@ fn nonce_is_sequence_little_endian_after_four_zero_bytes() {
 
     let header_len = u16::from_le_bytes([datagram[0], datagram[1]]) as usize;
     let (aad, sealed) = datagram.split_at(2 + header_len);
-    let (cipher, tag) = sealed.split_at(sealed.len() - 16);
+    let (cipher, tag) = sealed.split_last_chunk::<16>().unwrap();
     let nonce = [0, 0, 0, 0, 8, 7, 6, 5, 4, 3, 2, 1];
     let mut plain = cipher.to_vec();
     ChaCha20Poly1305::new(&cfg.transmit_key.into())
-        .decrypt_in_place_detached(&nonce.into(), aad, &mut plain, tag.into())
+        .decrypt_inout_detached(&nonce.into(), aad, plain.as_mut_slice().into(), &(*tag).into())
         .expect("nonce layout");
 }
 

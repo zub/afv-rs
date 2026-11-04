@@ -11,7 +11,8 @@ use std::fmt;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
-use chacha20poly1305::aead::AeadInPlace;
+use chacha20poly1305::aead::AeadInOut;
+use chacha20poly1305::aead::inout::InOutBuf;
 use chacha20poly1305::{ChaCha20Poly1305, KeyInit, Nonce, Tag};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
@@ -161,8 +162,10 @@ impl Codec {
         out.extend_from_slice(body);
 
         let (aad, plain) = out.split_at_mut(aad_len);
-        let tag =
-            self.tx.encrypt_in_place_detached(&nonce(sequence), aad, plain).map_err(|_| Error::TooLarge("datagram"))?;
+        let tag = self
+            .tx
+            .encrypt_inout_detached(&nonce(sequence), aad, plain.into())
+            .map_err(|_| Error::TooLarge("datagram"))?;
         out.extend_from_slice(&tag);
         Ok(out)
     }
@@ -187,13 +190,14 @@ impl Codec {
         }
 
         let sealed = &datagram[aad.len()..];
-        if sealed.len() <= TAG_LEN {
+        let Some((cipher, auth_tag)) = sealed.split_last_chunk::<TAG_LEN>().filter(|(c, _)| !c.is_empty()) else {
             return Err(Error::Truncated);
-        }
-        let (cipher, auth_tag) = sealed.split_at(sealed.len() - TAG_LEN);
-        let mut plain = cipher.to_vec();
+        };
+        // Decrypted straight from the datagram into `plain`.
+        let mut plain = vec![0; cipher.len()];
+        let buffer = InOutBuf::new(cipher, &mut plain).expect("same length");
         self.rx
-            .decrypt_in_place_detached(&nonce(sequence), aad, &mut plain, Tag::from_slice(auth_tag))
+            .decrypt_inout_detached(&nonce(sequence), aad, buffer, &Tag::from(*auth_tag))
             .map_err(|_| Error::Decrypt)?;
 
         let (name, body) = split_payload(&plain)?;
