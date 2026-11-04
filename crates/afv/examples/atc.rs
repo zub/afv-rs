@@ -158,7 +158,7 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     };
     let audio = client.audio();
     let (bridge, capture, mut playback) =
-        realtime::bridge(&audio, mic_format, &[(OutputBus::Headset, HEADSET), (OutputBus::Speaker, SPEAKER)]);
+        realtime::bridge(&audio, mic_format, &[(OutputBus::Headset, HEADSET), (OutputBus::Speaker, SPEAKER)])?;
     let (mut headset, mut speaker) = (playback.remove(0), playback.remove(0));
     // Each callback is all the real-time code there is: hand the buffer to the bridge.
     let devices = [

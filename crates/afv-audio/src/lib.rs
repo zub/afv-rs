@@ -25,7 +25,7 @@ pub mod tx;
 
 pub use bus::{Bus, RadioId};
 pub use codec::OpusError;
-pub use convert::{CaptureConverter, ConvertError, RenderConverter};
+pub use convert::{CaptureConverter, ConvertError, RenderConverter, check_format};
 pub use dsp::{Carrier, HfConditions, HfHardware, VhfHardware};
 pub use effects::{EffectSamples, SamplePlayer, Samples};
 pub use radio::{Output, Pan, Radio, RadioAudio, RadioSettings, RxChange, Signal};

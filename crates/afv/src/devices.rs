@@ -6,6 +6,7 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{FromSample, SampleFormat, SizedSample};
 use tokio::sync::broadcast;
 
+use crate::ConvertError;
 use crate::audio::Audio;
 use crate::events::Event;
 use crate::radio::OutputBus;
@@ -19,6 +20,8 @@ pub enum DeviceError {
     Cpal(#[from] cpal::Error),
     #[error("unsupported sample format {0}")]
     Format(SampleFormat),
+    #[error(transparent)]
+    UnsupportedFormat(#[from] ConvertError),
 }
 
 /// Which device to use.
@@ -110,7 +113,7 @@ pub fn attach(audio: &Audio, config: DeviceConfig) -> Result<Devices, DeviceErro
     }
     let format = |c: &cpal::SupportedStreamConfig| Format { sample_rate: c.sample_rate(), channels: c.channels() };
     let formats: Vec<_> = outputs.iter().map(|(bus, _, c)| (*bus, format(c))).collect();
-    let (bridge, capture, playback) = realtime::bridge(audio, input_config.as_ref().map(format), &formats);
+    let (bridge, capture, playback) = realtime::bridge(audio, input_config.as_ref().map(format), &formats)?;
 
     // Device errors are reported straight to the event stream: the callback that reports them
     // must not wait for the audio engine.

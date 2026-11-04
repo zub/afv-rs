@@ -31,7 +31,7 @@ pub mod radio;
 pub mod realtime;
 mod session;
 
-pub use afv_audio::{EffectSamples, HfConditions, MicProcessor, Samples};
+pub use afv_audio::{ConvertError, EffectSamples, HfConditions, MicProcessor, Samples};
 pub use afv_proto as proto;
 pub use audio::Audio;
 pub use client::{Client, ClientBuilder};

@@ -42,7 +42,8 @@ async fn transmission_round_trips_through_the_bridge() {
 
     let mic = Format { sample_rate: 44_100, channels: 1 };
     let speaker = Format { sample_rate: 48_000, channels: 2 };
-    let (bridge, capture, playback) = realtime::bridge(&client.audio(), Some(mic), &[(OutputBus::Headset, speaker)]);
+    let (bridge, capture, playback) =
+        realtime::bridge(&client.audio(), Some(mic), &[(OutputBus::Headset, speaker)]).unwrap();
     let (mut capture, mut playback) = (capture.unwrap(), playback.into_iter().next().unwrap());
 
     // The "device": every 10 ms, 441 microphone samples of a tone in and 480 stereo frames out.
@@ -84,5 +85,24 @@ async fn transmission_round_trips_through_the_bridge() {
     assert!((15..=25).contains(&sent), "about 400 ms transmitted, got {sent} packets");
     let peak = output.lock().unwrap()[heard_from..].iter().fold(0f32, |m, s| m.max(s.abs()));
     assert!(peak > 0.1, "the echo was played (peak {peak})");
+    client.disconnect().await;
+}
+
+#[tokio::test]
+async fn formats_no_device_has_are_refused_up_front() {
+    let server = FakeServer::start().await;
+    let client = server.client_builder().connect().await.unwrap();
+    let audio = client.audio();
+    let good = Format { sample_rate: 48_000, channels: 2 };
+    for bad in [
+        Format { sample_rate: 48_000, channels: 0 },
+        Format { sample_rate: 0, channels: 1 },
+        Format { sample_rate: u32::MAX, channels: 1 },
+        Format { sample_rate: 48_000, channels: u16::MAX },
+    ] {
+        assert!(realtime::bridge(&audio, Some(bad), &[(OutputBus::Headset, good)]).is_err(), "mic {bad:?}");
+        assert!(realtime::bridge(&audio, None, &[(OutputBus::Headset, good), (OutputBus::Speaker, bad)]).is_err());
+    }
+    assert!(realtime::bridge(&audio, Some(good), &[(OutputBus::Headset, good)]).is_ok());
     client.disconnect().await;
 }

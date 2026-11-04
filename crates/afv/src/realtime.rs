@@ -14,6 +14,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering::Relaxed};
 use std::thread::{self, JoinHandle, Thread};
 use std::time::Duration;
 
+use afv_audio::{ConvertError, check_format};
 use rtrb::{Consumer, Producer, RingBuffer};
 
 use crate::audio::Audio;
@@ -126,12 +127,17 @@ struct PlaybackSide {
     last_request: Arc<AtomicUsize>,
 }
 
+/// The worker and the handles for its streams: one [`Capture`] if there is a microphone, one
+/// [`Playback`] per output in the order given.
+pub type Bridged = (Bridge, Option<Capture>, Vec<Playback>);
+
 /// Starts a worker for a microphone stream (if any) and output streams in the given formats.
-pub fn bridge(
-    audio: &Audio,
-    mic: Option<Format>,
-    outputs: &[(OutputBus, Format)],
-) -> (Bridge, Option<Capture>, Vec<Playback>) {
+/// Fails, before starting anything, on a format with no channels, no sample rate, or values no
+/// device has.
+pub fn bridge(audio: &Audio, mic: Option<Format>, outputs: &[(OutputBus, Format)]) -> Result<Bridged, ConvertError> {
+    for format in mic.iter().chain(outputs.iter().map(|(_, f)| f)) {
+        check_format(format.sample_rate, format.channels)?;
+    }
     let stop = Arc::new(AtomicBool::new(false));
     let (sides_tx, sides_rx) = std::sync::mpsc::channel();
     let worker = {
@@ -171,7 +177,7 @@ pub fn bridge(
         playback_sides.push(PlaybackSide { bus, ring: producer, format, last_request });
     }
     let _ = sides_tx.send((capture_side, playback_sides));
-    (Bridge { stop, worker: Some(worker) }, capture, playback)
+    Ok((Bridge { stop, worker: Some(worker) }, capture, playback))
 }
 
 fn run(audio: &Audio, stop: &AtomicBool, mut capture: Option<CaptureSide>, mut playback: Vec<PlaybackSide>) {

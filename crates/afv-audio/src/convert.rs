@@ -14,8 +14,19 @@ pub enum ConvertError {
     Resampler(#[from] rubato::ResamplerConstructionError),
 }
 
-fn check(rate: u32, channels: u16) -> Result<(), ConvertError> {
-    if rate == 0 || channels == 0 { Err(ConvertError::Format { rate, channels }) } else { Ok(()) }
+/// Highest device sample rate accepted, above any audio interface's. Buffers and resamplers are
+/// sized from the rate, so a nonsense value from a broken driver must not reach them.
+pub const MAX_SAMPLE_RATE: u32 = 768_000;
+/// Most device channels accepted, for the same reason.
+pub const MAX_CHANNELS: u16 = 256;
+
+/// Checks that a device format is one the converters, and buffers sized from it, can handle.
+pub fn check_format(rate: u32, channels: u16) -> Result<(), ConvertError> {
+    if (1..=MAX_SAMPLE_RATE).contains(&rate) && (1..=MAX_CHANNELS).contains(&channels) {
+        Ok(())
+    } else {
+        Err(ConvertError::Format { rate, channels })
+    }
 }
 
 /// Resamples `input` (interleaved, `channels` wide) and appends the result to `out`.
@@ -52,7 +63,7 @@ pub struct CaptureConverter {
 
 impl CaptureConverter {
     pub fn new(sample_rate: u32, channels: u16) -> Result<Self, ConvertError> {
-        check(sample_rate, channels)?;
+        check_format(sample_rate, channels)?;
         let resampler = (sample_rate != SAMPLE_RATE)
             .then(|| Fft::new(sample_rate as usize, SAMPLE_RATE as usize, FRAME_SAMPLES, 1, FixedSync::Output))
             .transpose()?;
@@ -96,7 +107,7 @@ pub struct RenderConverter {
 
 impl RenderConverter {
     pub fn new(sample_rate: u32, channels: u16) -> Result<Self, ConvertError> {
-        check(sample_rate, channels)?;
+        check_format(sample_rate, channels)?;
         let rendered = (channels as usize).min(2);
         let resampler = (sample_rate != SAMPLE_RATE)
             .then(|| Fft::new(SAMPLE_RATE as usize, sample_rate as usize, FRAME_SAMPLES, rendered, FixedSync::Input))
@@ -168,10 +179,13 @@ mod tests {
     }
 
     #[test]
-    fn rejects_empty_formats() {
+    fn rejects_empty_and_absurd_formats() {
         assert!(CaptureConverter::new(0, 1).is_err());
         assert!(CaptureConverter::new(48_000, 0).is_err());
         assert!(RenderConverter::new(44_100, 0).is_err());
+        assert!(RenderConverter::new(u32::MAX, 2).is_err());
+        assert!(CaptureConverter::new(48_000, u16::MAX).is_err());
+        assert!(check_format(MAX_SAMPLE_RATE, MAX_CHANNELS).is_ok());
     }
 
     #[test]
